@@ -7,7 +7,7 @@ use canonical_error::CanonicalError;
 /// Abstract camera gain values range from 0 to 100, inclusive. Each camera type
 /// scales this gain value as needed, mapping 0 to its actual lowest gain and 100
 /// to its highest gain.
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct Gain(i32);
 
 impl fmt::Display for Gain {
@@ -32,7 +32,7 @@ impl Gain {
 /// scales the offset value as appropriate. 0 always means no offset; a non-zero
 /// offset can be used to "lift" pixel values up from 0 ADU to avoid crushing
 /// dark pixels to black.
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct Offset(i32);
 
 impl fmt::Display for Offset {
@@ -53,17 +53,21 @@ impl Offset {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct Celsius(pub i32);
 
+#[derive(Copy, Clone, Debug)]
 pub enum Flip {
     None, Horizontal, Vertical, Both
 }
 
+#[derive(Copy, Clone, Debug)]
 pub enum BinFactor {
     X1,  // Unbinned.
     X2,  // Each output pixel is the combined value of 2x2 input pixels.
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct RegionOfInterest {
     pub binning: BinFactor,
 
@@ -78,14 +82,16 @@ pub struct RegionOfInterest {
 }
 
 pub struct CapturedImage {
-    /// Pixel data stored in row major order.
+    /// Pixel data stored in row major order. This is the vector passed to
+    /// AbstractCamera::capture_image().
     pub image_data: Vec<u8>,
 
+    pub flip: Flip,
+    pub exposure_duration: std::time::Duration,
+    pub roi: RegionOfInterest,
     pub gain: Gain,
     pub offset: Offset,
-    pub roi: RegionOfInterest,
 
-    pub exposure_duration: std::time::Duration,
     pub readout_time: std::time::SystemTime,
     pub temperature: Celsius,
 }
@@ -96,9 +102,9 @@ pub struct CapturedImage {
 pub trait AbstractCamera {
     // Unchanging attributes.
 
-    /// Returns a string identifying what kind of camera this is. e.g. "ASI120mm mini"
-    /// or "RPiCam2"
-    fn model(&self) -> String;
+    /// Returns a string identifying what kind of camera this is. e.g.
+    /// "ASI120mm mini", "RPiCam2", etc.
+    fn model(&self) -> Result<String, CanonicalError>;
 
     /// Returns the (width, height) of this camera type's sensor.
     fn dimensions(&self) -> (i32, i32);
@@ -106,7 +112,7 @@ pub trait AbstractCamera {
     /// Identifies the gain value that maximizes signal-to-noise performance
     /// for this camera type. See https://www.youtube.com/watch?v=SYQ1i4k62eI
     /// for an explanation of this idea.
-    fn optimal_gain(&self) -> Gain;
+    fn optimal_gain(&self) -> Result<Gain, CanonicalError>;
 
     // Changeable parameters that influence subsequent image captures.
 
@@ -115,14 +121,14 @@ pub trait AbstractCamera {
     fn get_flip_mode(&self) -> Flip;
 
     /// Returns InvalidArgument if specified exposure duration cannot be
-    /// implemented by this camera type.
+    /// implemented by this camera type. Default is 100ms.
     fn set_exposure_duration(&mut self, exp_duration: std::time::Duration)
                              -> Result<(), CanonicalError>;
     /// Returns the exposure duration to be used for the next exposure.
     fn get_exposure_duration(&self) -> std::time::Duration;
 
     /// Default is unbinned, whole image. When setting region of interest,
-    /// the implementation will adjust capture_startpos and/or capture_dimensions
+    /// the implementation should adjust capture_startpos and/or capture_dimensions
     /// as needed to satisfy constraints of this camera type (e.g. capture width
     /// might need to be a multiple of 16). The adjusted region of interest is
     /// returned.
@@ -140,10 +146,14 @@ pub trait AbstractCamera {
 
     // Action methods.
 
-    /// Obtains a single image from this camera, as configured above. This function
-    /// blocks until the image is available. The wait time is related to the
-    /// exposure duration but can be shorter or longer depending on the implementation
-    /// of this camera type:
+    /// Obtains a single image from this camera, as configured above. The
+    /// returned image is "fresh" in that we either initiate the exposure or
+    /// we grab the next video frame exposure to complete.
+    /// Once an image has been obtained, calling this function again obtains a
+    /// new image.
+    /// This function blocks until the image is available. The wait time is
+    /// related to the exposure duration but can be shorter or longer depending
+    /// on the implementation of this camera type:
     /// Shorter: If the implementation runs the camera in video mode, a call to
     ///     capture_image() that occurs just as a video frame interval ends can
     ///     return quickly as it does not need to wait for the video frame time
@@ -163,5 +173,5 @@ pub trait AbstractCamera {
     /// re-start the camera, at the expense of that capture_image() call taking
     /// longer than usual.
     /// Many implementations will treat stop() as a no-op.
-    fn stop(&mut self);
+    fn stop(&mut self) -> Result<(), CanonicalError>;
 }

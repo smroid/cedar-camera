@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 canonical-error = "0.1.0"
+asi_camera2 = { version = "0.1.0", path = "../asi_camera2" }
