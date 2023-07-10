@@ -61,7 +61,7 @@ pub enum Flip {
     None, Horizontal, Vertical, Both
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum BinFactor {
     X1,  // Unbinned.
     X2,  // Each output pixel is the combined value of 2x2 input pixels.
@@ -112,7 +112,7 @@ pub trait AbstractCamera {
     /// Identifies the gain value that maximizes signal-to-noise performance
     /// for this camera type. See https://www.youtube.com/watch?v=SYQ1i4k62eI
     /// for an explanation of this idea.
-    fn optimal_gain(&self) -> Result<Gain, CanonicalError>;
+    fn optimal_gain(&self) -> Gain;
 
     // Changeable parameters that influence subsequent image captures.
 

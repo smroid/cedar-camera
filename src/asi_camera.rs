@@ -14,6 +14,9 @@ pub struct ASICamera {
 
     // Unchanging camera info.
     info: asi_camera2_sdk::ASI_CAMERA_INFO,
+    default_gain: i32,
+    min_gain: i32,
+    max_gain: i32,
 
     // Current camera settings.
     flip: Flip,
@@ -36,29 +39,18 @@ impl AbstractCamera for ASICamera {
         (self.info.MaxWidth as i32, self.info.MaxHeight as i32)
     }
 
-    fn optimal_gain(&self) -> Result<Gain, CanonicalError> {
+    fn optimal_gain(&self) -> Gain {
         // We could do a match of the model() and research the optimal gain value
         // for each. Instead, we just grab ASI's default gain value according to
         // the SDK.
-        let num_controls = self.asi_cam_sdk.get_num_controls().unwrap();
-        for control_index in 0..num_controls {
-            let control_caps = self.asi_cam_sdk.get_control_caps(control_index).unwrap();
-            if control_caps.ControlType == asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN {
-                let default_gain = control_caps.DefaultValue;
-                // The camera might not use 0..100 for range of gain values.
-                let min_gain = control_caps.MinValue;
-                let max_gain = control_caps.MaxValue;
-                if min_gain == 0 && max_gain == 100 {
-                    return Ok(Gain::new(default_gain as i32));
-                }
-                // Normalize default_gain according to our 0..100 range.
-                let frac =
-                    (default_gain - min_gain) as f64 / (max_gain - min_gain) as f64;
-                return Ok(Gain::new((100.0 * frac) as i32));
-            }
+        // The camera might not use 0..100 for range of gain values.
+        if self.min_gain == 0 && self.max_gain == 100 {
+            return Gain::new(self.default_gain as i32);
         }
-        Err(failed_precondition_error(
-            "Could not find control caps for ASI_CONTROL_TYPE_ASI_GAIN"))
+        // Normalize default_gain according to our 0..100 range.
+        let frac = (self.default_gain - self.min_gain) as f64 /
+            (self.max_gain - self.min_gain) as f64;
+        Gain::new((100.0 * frac) as i32)
     }
 
     fn set_flip_mode(&mut self, flip_mode: Flip) -> Result<(), CanonicalError> {
@@ -91,42 +83,50 @@ impl AbstractCamera for ASICamera {
 
     fn set_region_of_interest(&mut self, roi: RegionOfInterest)
                               -> Result<RegionOfInterest, CanonicalError> {
-        // Validate/adjust capture dimensions.
-        let (mut roi_width, mut roi_height) = roi.capture_dimensions;
+        // ASI SDK has separate functions for setting binning & capture size vs
+        // capture position. Detect what's changing and only make the needed
+        // call(s).
+        if self.roi.binning != roi.binning ||
+           self.roi.capture_dimensions != roi.capture_dimensions {
+            // Validate/adjust capture dimensions.
+            let (mut roi_width, mut roi_height) = roi.capture_dimensions;
+            // ASI doc says width%8 must be 0, and height%2 must be 0.
+            roi_width -= roi_width % 8;
+            roi_height -= roi_height % 2;
+            // Additionally, ASI doc says that for ASI120 model, width*height%1024
+            // must be 0. We punt on this for now.
 
-        // ASI doc says width%8 must be 0, and height%2 must be 0.
-        roi_width -= roi_width % 8;
-        roi_height -= roi_height % 2;
-        // Additionally, ASI doc says that for ASI120 model, width*height%1024
-        // must be 0. We punt on this for now.
-
-        let mut adj_roi = roi;
-        adj_roi.capture_dimensions = (roi_width, roi_height);
-        match self.asi_cam_sdk.set_roi_format(
-            roi_width, roi_height,
-            match roi.binning { BinFactor::X1 => 1, BinFactor::X2 => 2, },
-            asi_camera2_sdk::ASI_IMG_TYPE_ASI_IMG_RAW8) {
-            Ok(()) => (),
-            Err(e) => return Err(failed_precondition_error(&e.to_string()))
-        }
-        // See if capture position is changing (this is set separately in
-        // the SDK).
-        if self.roi.capture_startpos != roi.capture_startpos {
-            adj_roi.capture_startpos = roi.capture_startpos;
-            match self.asi_cam_sdk.set_start_pos(
-                roi.capture_startpos.0, roi.capture_startpos.1,) {
-                Ok(()) => (),
+            match self.asi_cam_sdk.set_roi_format(
+                roi_width, roi_height,
+                match roi.binning { BinFactor::X1 => 1, BinFactor::X2 => 2, },
+                asi_camera2_sdk::ASI_IMG_TYPE_ASI_IMG_RAW8) {
+                Ok(()) => { self.roi.binning = roi.binning;
+                            self.roi.capture_dimensions = (roi_width, roi_height); },
                 Err(e) => return Err(failed_precondition_error(&e.to_string()))
             }
         }
-        self.roi = adj_roi;
+        if self.roi.capture_startpos != roi.capture_startpos {
+            match self.asi_cam_sdk.set_start_pos(
+                roi.capture_startpos.0, roi.capture_startpos.1,) {
+                Ok(()) => { self.roi.capture_startpos = roi.capture_startpos; },
+                Err(e) => return Err(failed_precondition_error(&e.to_string()))
+            }
+        }
         Ok(self.roi)
     }
     fn get_region_of_interest(&self) -> RegionOfInterest { self.roi }
 
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
+        let mut camera_gain = gain.value();
+        // The camera might not use 0..100 for range of gain values.
+        if self.min_gain != 0 || self.max_gain != 100 {
+            // Translate our 0..100 into the camera's min/max range.
+            let frac = gain.value() as f64 / 100.0;
+            camera_gain =
+                self.min_gain + ((self.max_gain - self.min_gain) as f64 * frac) as i32;
+        }
         match self.asi_cam_sdk.set_control_value(
-            asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN, gain.value() as i64,
+            asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN, camera_gain as i64,
             /*auto=*/false) {
             Ok(()) => { self.gain = gain; Ok(()) },
             Err(e) => Err(failed_precondition_error(&e.to_string()))
@@ -211,16 +211,15 @@ pub fn create_asi_camera(asi_cam_sdk: asi_camera2_sdk::ASICamera)
     };
     let mut asi_cam = ASICamera{asi_cam_sdk,
                                 info,
+                                default_gain: 0, min_gain: 0, max_gain: 0,
                                 flip: Flip::None,
                                 exposure_duration: Duration::from_millis(100),
                                 roi: RegionOfInterest{binning: BinFactor::X1,
-                                                      capture_dimensions: (0, 0),
-                                                      capture_startpos: (0, 0)},
+                                                      capture_dimensions: (-1, -1),
+                                                      capture_startpos: (-1, -1)},
                                 gain: Gain::new(0),
                                 offset: Offset::new(0),
                                 vid_running: false};
-    asi_cam.gain = asi_cam.optimal_gain()?;
-    asi_cam.roi.capture_dimensions = asi_cam.dimensions();
     match asi_cam.asi_cam_sdk.open() {
         Ok(()) => (),
         Err(e) => return Err(failed_precondition_error(&e.to_string()))
@@ -229,5 +228,33 @@ pub fn create_asi_camera(asi_cam_sdk: asi_camera2_sdk::ASICamera)
         Ok(()) => (),
         Err(e) => return Err(failed_precondition_error(&e.to_string()))
     }
+    // Find the camera's min/max gain values.
+    let mut got_gain = false;
+    let num_controls = asi_cam.asi_cam_sdk.get_num_controls().unwrap();
+    for control_index in 0..num_controls {
+        let control_caps = asi_cam.asi_cam_sdk.get_control_caps(control_index).unwrap();
+        if control_caps.ControlType == asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN {
+            asi_cam.default_gain = control_caps.DefaultValue as i32;
+            asi_cam.min_gain = control_caps.MinValue as i32;
+            asi_cam.max_gain = control_caps.MaxValue as i32;
+            got_gain = true;
+            break;
+        }
+    }
+    if !got_gain {
+        return Err(failed_precondition_error(
+            "Could not find control caps for ASI_CONTROL_TYPE_ASI_GAIN"));
+    }
+    // Push the defaults to the camera.
+    asi_cam.set_flip_mode(asi_cam.flip)?;
+    asi_cam.set_exposure_duration(asi_cam.exposure_duration)?;
+    asi_cam.set_region_of_interest(
+        RegionOfInterest{ binning: BinFactor::X1,
+                          capture_startpos: (0, 0),
+                          capture_dimensions: asi_cam.dimensions(),
+        })?;
+    asi_cam.set_gain(asi_cam.optimal_gain())?;
+    asi_cam.set_offset(Offset::new(0))?;
+
     Ok(asi_cam)
 }
