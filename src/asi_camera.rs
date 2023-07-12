@@ -165,7 +165,7 @@ impl AbstractCamera for ASICamera {
         }
         let temp = match self.asi_cam_sdk.get_control_value(
             asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_TEMPERATURE) {
-            Ok(x) => { Celsius(x.0 as i32) },
+            Ok(x) => { Celsius((x.0 / 10) as i32) },
             Err(e) => { return Err(failed_precondition_error(&e.to_string())); }
         };
         Ok(CapturedImage {

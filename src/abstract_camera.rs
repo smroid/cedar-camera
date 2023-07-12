@@ -82,8 +82,8 @@ pub struct RegionOfInterest {
 }
 
 pub struct CapturedImage {
-    /// Pixel data stored in row major order. This is the vector passed to
-    /// AbstractCamera::capture_image().
+    /// Pixel data stored in row major order. This is typically (but not
+    /// always) the vector passed to AbstractCamera::capture_image().
     pub image_data: Vec<u8>,
 
     pub flip: Flip,
@@ -163,8 +163,9 @@ pub trait AbstractCamera {
     ///     capture_image() after changing certain settings, can incur significant
     ///     delay beyond the exposure duration.
     /// `image_data` must be sized to at least the ROI's capture dimensions
-    ///     width*height. The `image_data` is moved (not copied) to the returned
-    ///     CapturedImage.
+    ///     width*height. The `image_data` is typically moved (not copied) to the
+    ///     returned CapturedImage, though some implementations might manage
+    ///     memory differently.
     fn capture_image(&mut self, image_data: Vec<u8>)
                      -> Result<CapturedImage, CanonicalError>;
 

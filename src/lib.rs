@@ -1,2 +1,2 @@
-mod abstract_camera;
-mod asi_camera;
+pub mod abstract_camera;
+pub mod asi_camera;
