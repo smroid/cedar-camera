@@ -2,7 +2,11 @@ extern crate chrono;
 use chrono::offset::Local;
 use chrono::DateTime;
 
+use std::env;
 use std::time::Duration;
+
+use log::info;
+use env_logger;
 
 use image::GrayImage;
 
@@ -11,6 +15,10 @@ use camera_service::abstract_camera::AbstractCamera;
 use camera_service::asi_camera;
 
 fn main() {
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info")).init();
+    let args: Vec<String> = env::args().collect();
+
     let num_cameras = asi_camera2_sdk::num_connected_asi_cameras();
     if num_cameras == 0 {
         panic!("No camera??");
@@ -33,9 +41,9 @@ fn main() {
     // Move captured_image's image data into a GrayImage.
     let image = GrayImage::from_raw(width as u32, height as u32,
                                     captured_image.image_data).unwrap();
-    image.save("image.jpg").unwrap();
+    image.save(&args[1]).unwrap();
 
     let datetime: DateTime<Local> = captured_image.readout_time.into();
-    println!("Image obtained at {} with temperature {}",
-             datetime.format("%d/%m/%Y %T"), captured_image.temperature.0);
+    info!("Image obtained at {} with temperature {}",
+          datetime.format("%d/%m/%Y %T"), captured_image.temperature.0);
 }

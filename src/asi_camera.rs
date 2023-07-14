@@ -2,7 +2,9 @@ use canonical_error::{CanonicalError, failed_precondition_error,
                       invalid_argument_error};
 
 use std::ffi::CStr;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+use log::info;
 
 use asi_camera2::asi_camera2_sdk;
 use crate::abstract_camera::{AbstractCamera, BinFactor, CapturedImage,
@@ -146,7 +148,9 @@ impl AbstractCamera for ASICamera {
 
     fn capture_image(&mut self, mut image_data: Vec<u8>)
                      -> Result<CapturedImage, CanonicalError> {
+        let capture_start = Instant::now();
         if !self.vid_running {
+            info!("Starting video capture");
             match self.asi_cam_sdk.start_video_capture() {
                 Ok(()) => { self.vid_running = true; },
                 Err(e) => return Err(failed_precondition_error(&e.to_string()))
@@ -168,6 +172,7 @@ impl AbstractCamera for ASICamera {
             Ok(x) => { Celsius((x.0 / 10) as i32) },
             Err(e) => { return Err(failed_precondition_error(&e.to_string())); }
         };
+        info!("capture_image took {:?}", capture_start.elapsed());
         Ok(CapturedImage {
             image_data: image_data,
             flip: self.flip,
@@ -182,6 +187,7 @@ impl AbstractCamera for ASICamera {
 
     fn stop(&mut self) -> Result<(), CanonicalError> {
         if self.vid_running {
+            info!("Stopping video capture");
             match self.asi_cam_sdk.stop_video_capture() {
                 Ok(()) => { self.vid_running = false; },
                 Err(e) => return Err(failed_precondition_error(&e.to_string()))
@@ -256,5 +262,6 @@ pub fn create_asi_camera(asi_cam_sdk: asi_camera2_sdk::ASICamera)
     asi_cam.set_gain(asi_cam.optimal_gain())?;
     asi_cam.set_offset(Offset::new(0))?;
 
+    info!("Created ASICamera API object");
     Ok(asi_cam)
 }
