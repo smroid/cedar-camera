@@ -41,7 +41,12 @@ fn main() {
     // Move captured_image's image data into a GrayImage.
     let image = GrayImage::from_raw(width as u32, height as u32,
                                     captured_image.image_data).unwrap();
-    image.save(&args[1]).unwrap();
+
+    // Modify the filename to incorporate the exposure time. The .jpg extension
+    // is automatically appended (it should not be provided on the command
+    // line).
+    let filename = format!("{}_{}ms.jpg", &args[1], exposure_time_millisec);
+    image.save(filename).unwrap();
 
     let datetime: DateTime<Local> = captured_image.readout_time.into();
     info!("Image obtained at {} with temperature {}",
