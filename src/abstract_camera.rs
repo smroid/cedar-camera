@@ -61,6 +61,12 @@ pub enum Flip {
     None, Horizontal, Vertical, Both
 }
 
+/// Some cameras provide in-hardware binning. We require all cameras
+/// to support unbinned and 2x binned operation; if a camera does
+/// not natively provide binning capability, the AbstractCamera
+/// implementation must perform software binning.
+/// Note that binning is either by summing or averaging; it is up
+/// to application logic to react and set exposure accordingly.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum BinFactor {
     X1,  // Unbinned.
@@ -99,6 +105,8 @@ pub struct CapturedImage {
 /// AbstractCamera models an 8-bit greyscale camera. This trait defines methods
 /// for obtaining information about the camera, setting its operating parameters,
 /// and capturing images.
+/// Note that we do not provide a 'gamma' setting; all AbstractCamera implementations
+/// should configure the camera for linear mapping.
 pub trait AbstractCamera {
     // Unchanging attributes.
 
