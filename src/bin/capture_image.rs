@@ -19,15 +19,15 @@ fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
     let args: Vec<String> = env::args().collect();
 
-    let num_cameras = asi_camera2_sdk::num_connected_asi_cameras();
+    let num_cameras = asi_camera2_sdk::ASICamera::num_connected_asi_cameras();
     if num_cameras == 0 {
         panic!("No camera??");
     }
     if num_cameras > 1 {
         println!("num_cameras: {}; using first camera", num_cameras);
     }
-    let mut asi_camera = asi_camera::create_asi_camera(
-        asi_camera2_sdk::create_asi_camera(0)).unwrap();
+    let mut asi_camera = asi_camera::ASICamera::new(
+        asi_camera2_sdk::ASICamera::new(0)).unwrap();
     let (width, height) = asi_camera.dimensions();
 
     // Allocate buffer to receive camera data.

@@ -31,6 +31,76 @@ pub struct ASICamera {
     vid_running: bool,
 }
 
+impl ASICamera {
+    /// Returns an ASICamera instance that implements the AbstractCamera API.
+    pub fn new(asi_cam_sdk: asi_camera2_sdk::ASICamera)
+               -> Result<Self, CanonicalError> {
+        let info = match asi_cam_sdk.get_property() {
+            Ok(x) => x,
+            Err(e) => return Err(failed_precondition_error(&e.to_string()))
+        };
+        let mut asi_cam = ASICamera{asi_cam_sdk,
+                                    info,
+                                    default_gain: 0, min_gain: 0, max_gain: 0,
+                                    flip: Flip::None,
+                                    exposure_duration: Duration::from_millis(100),
+                                    roi: RegionOfInterest{binning: BinFactor::X1,
+                                                          capture_dimensions: (-1, -1),
+                                                          capture_startpos: (-1, -1)},
+                                    gain: Gain::new(0),
+                                    offset: Offset::new(0),
+                                    vid_running: false};
+        match asi_cam.asi_cam_sdk.open() {
+            Ok(()) => (),
+            Err(e) => return Err(failed_precondition_error(&e.to_string()))
+        }
+        match asi_cam.asi_cam_sdk.init() {
+            Ok(()) => (),
+            Err(e) => return Err(failed_precondition_error(&e.to_string()))
+        }
+        // Find the camera's min/max gain values.
+        let mut got_gain = false;
+        let num_controls = asi_cam.asi_cam_sdk.get_num_controls().unwrap();
+        for control_index in 0..num_controls {
+            let control_caps = asi_cam.asi_cam_sdk.get_control_caps(control_index).unwrap();
+            if control_caps.ControlType == asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN {
+                asi_cam.default_gain = control_caps.DefaultValue as i32;
+                asi_cam.min_gain = control_caps.MinValue as i32;
+                asi_cam.max_gain = control_caps.MaxValue as i32;
+                got_gain = true;
+                break;
+            }
+        }
+        if !got_gain {
+            return Err(failed_precondition_error(
+                "Could not find control caps for ASI_CONTROL_TYPE_ASI_GAIN"));
+        }
+        // Push the defaults to the camera.
+        asi_cam.set_flip_mode(asi_cam.flip)?;
+        asi_cam.set_exposure_duration(asi_cam.exposure_duration)?;
+        asi_cam.set_region_of_interest(
+            RegionOfInterest{ binning: BinFactor::X1,
+                              capture_startpos: (0, 0),
+                              capture_dimensions: asi_cam.dimensions(),
+            })?;
+        asi_cam.set_gain(asi_cam.optimal_gain())?;
+        asi_cam.set_offset(Offset::new(0))?;
+
+        info!("Created ASICamera API object");
+        Ok(asi_cam)
+    }  // new().
+}
+
+/// We arrange to call stop() when ASICamera object goes out of scope.
+impl Drop for ASICamera {
+    fn drop(&mut self) {
+        self.stop().unwrap_or_else(|err| {
+            panic!("Error stopping camera id {}: {}",
+                   self.asi_cam_sdk.camera_id(), err);
+        });
+    }
+}
+
 impl AbstractCamera for ASICamera {
     fn model(&self) -> Result<String, CanonicalError> {
         let cstr = CStr::from_bytes_until_nul(&self.info.Name).unwrap();
@@ -195,73 +265,4 @@ impl AbstractCamera for ASICamera {
         }
         Ok(())
     }
-}
-
-/// We arrange to call stop() when ASICamera object goes out of scope.
-impl Drop for ASICamera {
-    fn drop(&mut self) {
-        self.stop().unwrap_or_else(|err| {
-            panic!("Error stopping camera id {}: {}",
-                   self.asi_cam_sdk.camera_id(), err);
-        });
-    }
-}
-
-/// Returns an ASICamera instance that implements the AbstractCamera API.
-#[allow(dead_code)]
-pub fn create_asi_camera(asi_cam_sdk: asi_camera2_sdk::ASICamera)
-                         -> Result<ASICamera, CanonicalError> {
-    let info = match asi_cam_sdk.get_property() {
-        Ok(x) => x,
-        Err(e) => return Err(failed_precondition_error(&e.to_string()))
-    };
-    let mut asi_cam = ASICamera{asi_cam_sdk,
-                                info,
-                                default_gain: 0, min_gain: 0, max_gain: 0,
-                                flip: Flip::None,
-                                exposure_duration: Duration::from_millis(100),
-                                roi: RegionOfInterest{binning: BinFactor::X1,
-                                                      capture_dimensions: (-1, -1),
-                                                      capture_startpos: (-1, -1)},
-                                gain: Gain::new(0),
-                                offset: Offset::new(0),
-                                vid_running: false};
-    match asi_cam.asi_cam_sdk.open() {
-        Ok(()) => (),
-        Err(e) => return Err(failed_precondition_error(&e.to_string()))
-    }
-    match asi_cam.asi_cam_sdk.init() {
-        Ok(()) => (),
-        Err(e) => return Err(failed_precondition_error(&e.to_string()))
-    }
-    // Find the camera's min/max gain values.
-    let mut got_gain = false;
-    let num_controls = asi_cam.asi_cam_sdk.get_num_controls().unwrap();
-    for control_index in 0..num_controls {
-        let control_caps = asi_cam.asi_cam_sdk.get_control_caps(control_index).unwrap();
-        if control_caps.ControlType == asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN {
-            asi_cam.default_gain = control_caps.DefaultValue as i32;
-            asi_cam.min_gain = control_caps.MinValue as i32;
-            asi_cam.max_gain = control_caps.MaxValue as i32;
-            got_gain = true;
-            break;
-        }
-    }
-    if !got_gain {
-        return Err(failed_precondition_error(
-            "Could not find control caps for ASI_CONTROL_TYPE_ASI_GAIN"));
-    }
-    // Push the defaults to the camera.
-    asi_cam.set_flip_mode(asi_cam.flip)?;
-    asi_cam.set_exposure_duration(asi_cam.exposure_duration)?;
-    asi_cam.set_region_of_interest(
-        RegionOfInterest{ binning: BinFactor::X1,
-                          capture_startpos: (0, 0),
-                          capture_dimensions: asi_cam.dimensions(),
-        })?;
-    asi_cam.set_gain(asi_cam.optimal_gain())?;
-    asi_cam.set_offset(Offset::new(0))?;
-
-    info!("Created ASICamera API object");
-    Ok(asi_cam)
 }
