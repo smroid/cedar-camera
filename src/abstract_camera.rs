@@ -7,7 +7,7 @@ use canonical_error::CanonicalError;
 /// Abstract camera gain values range from 0 to 100, inclusive. Each camera type
 /// scales this gain value as needed, mapping 0 to its actual lowest gain and 100
 /// to its highest gain.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Gain(i32);
 
 impl fmt::Display for Gain {
@@ -32,7 +32,7 @@ impl Gain {
 /// scales the offset value as appropriate. 0 always means no offset; a non-zero
 /// offset can be used to "lift" pixel values up from 0 ADU to avoid crushing
 /// dark pixels to black.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Offset(i32);
 
 impl fmt::Display for Offset {
@@ -56,7 +56,7 @@ impl Offset {
 #[derive(Copy, Clone, Debug)]
 pub struct Celsius(pub i32);
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Flip {
     None, Horizontal, Vertical, Both
 }
@@ -73,7 +73,7 @@ pub enum BinFactor {
     X2,  // Each output pixel is the combined value of 2x2 input pixels.
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct RegionOfInterest {
     pub binning: BinFactor,
 
@@ -87,16 +87,22 @@ pub struct RegionOfInterest {
     pub capture_dimensions: (i32, i32),
 }
 
-pub struct CapturedImage {
-    /// Pixel data stored in row major order. This is typically (but not
-    /// always) the vector passed to AbstractCamera::capture_image().
-    pub image_data: Vec<u8>,
-
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct CaptureParams {
     pub flip: Flip,
     pub exposure_duration: std::time::Duration,
     pub roi: RegionOfInterest,
     pub gain: Gain,
     pub offset: Offset,
+}
+
+pub struct CapturedImage {
+    /// The parameters that were in effect when the image capture
+    /// occurred.
+    pub capture_params: CaptureParams,
+
+    /// Pixel data stored in row major order.
+    pub image_data: Vec<u8>,
 
     pub readout_time: std::time::SystemTime,
     pub temperature: Celsius,
@@ -157,8 +163,8 @@ pub trait AbstractCamera {
     /// Obtains a single image from this camera, as configured above. The
     /// returned image is "fresh" in that we either initiate the exposure or
     /// we grab the next video frame exposure to complete.
-    /// Once an image has been obtained, calling this function again obtains a
-    /// new image.
+    /// This function "consumes" the image it returns. Calling this function
+    /// again obtains a new image.
     /// This function blocks until the image is available. The wait time is
     /// related to the exposure duration but can be shorter or longer depending
     /// on the implementation of this camera type:
@@ -170,12 +176,7 @@ pub trait AbstractCamera {
     /// Longer: The first call to capture_image(), or the next call to
     ///     capture_image() after changing certain settings, can incur significant
     ///     delay beyond the exposure duration.
-    /// `image_data` must be sized to at least the ROI's capture dimensions
-    ///     width*height. The `image_data` is typically moved (not copied) to the
-    ///     returned CapturedImage, though some implementations might manage
-    ///     memory differently.
-    fn capture_image(&mut self, image_data: Vec<u8>)
-                     -> Result<CapturedImage, CanonicalError>;
+    fn capture_image(&mut self) -> Result<CapturedImage, CanonicalError>;
 
     /// Some implementations can shut down the camera to save power, e.g. by
     /// discontinuing video mode. A subsequent call to capture_image() will

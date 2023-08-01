@@ -1,5 +1,4 @@
-use canonical_error::{CanonicalError, failed_precondition_error,
-                      invalid_argument_error};
+use canonical_error::{CanonicalError, failed_precondition_error};
 
 use std::ffi::CStr;
 use std::time::{Duration, Instant, SystemTime};
@@ -7,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use log::info;
 
 use asi_camera2::asi_camera2_sdk;
-use crate::abstract_camera::{AbstractCamera, BinFactor, CapturedImage,
+use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedImage,
                              Celsius, Flip, Gain, Offset, RegionOfInterest};
 
 pub struct ASICamera {
@@ -21,11 +20,7 @@ pub struct ASICamera {
     max_gain: i32,
 
     // Current camera settings.
-    flip: Flip,
-    exposure_duration: Duration,
-    roi: RegionOfInterest,
-    gain: Gain,
-    offset: Offset,
+    camera_settings: CaptureParams,
 
     // Keep track of whether video capture is started.
     vid_running: bool,
@@ -42,13 +37,15 @@ impl ASICamera {
         let mut asi_cam = ASICamera{asi_cam_sdk,
                                     info,
                                     default_gain: 0, min_gain: 0, max_gain: 0,
-                                    flip: Flip::None,
-                                    exposure_duration: Duration::from_millis(100),
-                                    roi: RegionOfInterest{binning: BinFactor::X1,
-                                                          capture_dimensions: (-1, -1),
-                                                          capture_startpos: (-1, -1)},
-                                    gain: Gain::new(0),
-                                    offset: Offset::new(0),
+                                    camera_settings: CaptureParams{
+                                        flip: Flip::None,
+                                        exposure_duration: Duration::from_millis(100),
+                                        roi: RegionOfInterest{binning: BinFactor::X1,
+                                                              capture_dimensions: (-1, -1),
+                                                              capture_startpos: (-1, -1)},
+                                        gain: Gain::new(0),
+                                        offset: Offset::new(0),
+                                    },
                                     vid_running: false};
         match asi_cam.asi_cam_sdk.open() {
             Ok(()) => (),
@@ -76,8 +73,8 @@ impl ASICamera {
                 "Could not find control caps for ASI_CONTROL_TYPE_ASI_GAIN"));
         }
         // Push the defaults to the camera.
-        asi_cam.set_flip_mode(asi_cam.flip)?;
-        asi_cam.set_exposure_duration(asi_cam.exposure_duration)?;
+        asi_cam.set_flip_mode(asi_cam.camera_settings.flip)?;
+        asi_cam.set_exposure_duration(asi_cam.camera_settings.exposure_duration)?;
         asi_cam.set_region_of_interest(
             RegionOfInterest{ binning: BinFactor::X1,
                               capture_startpos: (0, 0),
@@ -135,11 +132,11 @@ impl AbstractCamera for ASICamera {
         match self.asi_cam_sdk.set_control_value(
             asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_FLIP, sdk_flip as i64,
             /*auto=*/false) {
-            Ok(x) => { self.flip = flip_mode; return Ok(x) },
+            Ok(x) => { self.camera_settings.flip = flip_mode; return Ok(x) },
             Err(e) => Err(failed_precondition_error(&e.to_string()))
         }
     }
-    fn get_flip_mode(&self) -> Flip { self.flip }
+    fn get_flip_mode(&self) -> Flip { self.camera_settings.flip }
 
     fn set_exposure_duration(&mut self, exp_duration: Duration)
                              -> Result<(), CanonicalError> {
@@ -147,19 +144,22 @@ impl AbstractCamera for ASICamera {
         match self.asi_cam_sdk.set_control_value(
             asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_EXPOSURE, exp_micros,
             /*auto=*/false) {
-            Ok(()) => { self.exposure_duration = exp_duration; Ok(()) },
+            Ok(()) => { self.camera_settings.exposure_duration =
+                        exp_duration; Ok(()) },
             Err(e) => Err(failed_precondition_error(&e.to_string()))
         }
     }
-    fn get_exposure_duration(&self) -> Duration { self.exposure_duration }
+    fn get_exposure_duration(&self) -> Duration {
+        self.camera_settings.exposure_duration
+    }
 
     fn set_region_of_interest(&mut self, roi: RegionOfInterest)
                               -> Result<RegionOfInterest, CanonicalError> {
         // ASI SDK has separate functions for setting binning & capture size vs
         // capture position. Detect what's changing and only make the needed
         // call(s).
-        if self.roi.binning != roi.binning ||
-           self.roi.capture_dimensions != roi.capture_dimensions {
+        if self.camera_settings.roi.binning != roi.binning ||
+           self.camera_settings.roi.capture_dimensions != roi.capture_dimensions {
             // Validate/adjust capture dimensions.
             let (mut roi_width, mut roi_height) = roi.capture_dimensions;
             // ASI doc says width%8 must be 0, and height%2 must be 0.
@@ -172,21 +172,23 @@ impl AbstractCamera for ASICamera {
                 roi_width, roi_height,
                 match roi.binning { BinFactor::X1 => 1, BinFactor::X2 => 2, },
                 asi_camera2_sdk::ASI_IMG_TYPE_ASI_IMG_RAW8) {
-                Ok(()) => { self.roi.binning = roi.binning;
-                            self.roi.capture_dimensions = (roi_width, roi_height); },
+                Ok(()) => { self.camera_settings.roi.binning = roi.binning;
+                            self.camera_settings.roi.capture_dimensions =
+                            (roi_width, roi_height); },
                 Err(e) => return Err(failed_precondition_error(&e.to_string()))
             }
         }
-        if self.roi.capture_startpos != roi.capture_startpos {
+        if self.camera_settings.roi.capture_startpos != roi.capture_startpos {
             match self.asi_cam_sdk.set_start_pos(
                 roi.capture_startpos.0, roi.capture_startpos.1,) {
-                Ok(()) => { self.roi.capture_startpos = roi.capture_startpos; },
+                Ok(()) => { self.camera_settings.roi.capture_startpos =
+                            roi.capture_startpos; },
                 Err(e) => return Err(failed_precondition_error(&e.to_string()))
             }
         }
-        Ok(self.roi)
+        Ok(self.camera_settings.roi)
     }
-    fn get_region_of_interest(&self) -> RegionOfInterest { self.roi }
+    fn get_region_of_interest(&self) -> RegionOfInterest { self.camera_settings.roi }
 
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
         let mut camera_gain = gain.value();
@@ -200,24 +202,23 @@ impl AbstractCamera for ASICamera {
         match self.asi_cam_sdk.set_control_value(
             asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN, camera_gain as i64,
             /*auto=*/false) {
-            Ok(()) => { self.gain = gain; Ok(()) },
+            Ok(()) => { self.camera_settings.gain = gain; Ok(()) },
             Err(e) => Err(failed_precondition_error(&e.to_string()))
         }
     }
-    fn get_gain(&self) -> Gain { self.gain }
+    fn get_gain(&self) -> Gain { self.camera_settings.gain }
 
     fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError> {
         match self.asi_cam_sdk.set_control_value(
             asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_OFFSET, offset.value() as i64,
             /*auto=*/false) {
-            Ok(()) => { self.offset = offset; Ok(()) },
+            Ok(()) => { self.camera_settings.offset = offset; Ok(()) },
             Err(e) => Err(failed_precondition_error(&e.to_string()))
         }
     }
-    fn get_offset(&self) -> Offset { self.offset }
+    fn get_offset(&self) -> Offset { self.camera_settings.offset }
 
-    fn capture_image(&mut self, mut image_data: Vec<u8>)
-                     -> Result<CapturedImage, CanonicalError> {
+    fn capture_image(&mut self) -> Result<CapturedImage, CanonicalError> {
         let capture_start = Instant::now();
         if !self.vid_running {
             info!("Starting video capture");
@@ -226,12 +227,9 @@ impl AbstractCamera for ASICamera {
                 Err(e) => return Err(failed_precondition_error(&e.to_string()))
             }
         }
-        let (w, h) = self.roi.capture_dimensions;
-        if (image_data.len() as i32) < w * h {
-            return Err(invalid_argument_error(
-                format!("image_data length {} too small for ROI width*height {}*{}",
-                        image_data.len(), w, h).as_str()));
-        }
+        let (w, h) = self.camera_settings.roi.capture_dimensions;
+        let mut image_data = Vec::<u8>::new();
+        image_data.resize((w * h) as usize, 0);
         match self.asi_cam_sdk.get_video_data(image_data.as_mut_ptr(), (w*h) as i64,
                                               /*wait_ms=*/-1) {
             Ok(()) => (),
@@ -244,12 +242,8 @@ impl AbstractCamera for ASICamera {
         };
         info!("capture_image took {:?}", capture_start.elapsed());
         Ok(CapturedImage {
+            capture_params: self.camera_settings,
             image_data: image_data,
-            flip: self.flip,
-            exposure_duration: self.exposure_duration,
-            roi: self.roi,
-            gain: self.gain,
-            offset: self.offset,
             readout_time: SystemTime::now(),
             temperature: temp,
         })

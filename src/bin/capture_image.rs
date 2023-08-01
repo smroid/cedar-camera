@@ -30,13 +30,10 @@ fn main() {
         asi_camera2_sdk::ASICamera::new(0)).unwrap();
     let (width, height) = asi_camera.dimensions();
 
-    // Allocate buffer to receive camera data.
-    let pixels = vec![0u8; (width*height) as usize];
-
     let exposure_time_millisec = 5;
     asi_camera.set_exposure_duration(Duration::from_millis(
         exposure_time_millisec)).unwrap();
-    let captured_image = asi_camera.capture_image(pixels).unwrap();
+    let captured_image = asi_camera.capture_image().unwrap();
 
     // Move captured_image's image data into a GrayImage.
     let image = GrayImage::from_raw(width as u32, height as u32,
