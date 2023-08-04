@@ -1,13 +1,14 @@
 #![allow(dead_code)]
 
 use std::fmt;
+use std::time::Duration;
 
 use canonical_error::CanonicalError;
 
 /// Abstract camera gain values range from 0 to 100, inclusive. Each camera type
 /// scales this gain value as needed, mapping 0 to its actual lowest gain and 100
 /// to its highest gain.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Gain(i32);
 
 impl fmt::Display for Gain {
@@ -32,7 +33,7 @@ impl Gain {
 /// scales the offset value as appropriate. 0 always means no offset; a non-zero
 /// offset can be used to "lift" pixel values up from 0 ADU to avoid crushing
 /// dark pixels to black.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Offset(i32);
 
 impl fmt::Display for Offset {
@@ -56,9 +57,13 @@ impl Offset {
 #[derive(Copy, Clone, Debug)]
 pub struct Celsius(pub i32);
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub enum Flip {
-    None, Horizontal, Vertical, Both
+    #[default]
+    None,
+    Horizontal,
+    Vertical,
+    Both
 }
 
 /// Some cameras provide in-hardware binning. We require all cameras
@@ -67,13 +72,14 @@ pub enum Flip {
 /// implementation must perform software binning.
 /// Note that binning is either by summing or averaging; it is up
 /// to application logic to react and set exposure accordingly.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub enum BinFactor {
+    #[default]
     X1,  // Unbinned.
     X2,  // Each output pixel is the combined value of 2x2 input pixels.
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct RegionOfInterest {
     pub binning: BinFactor,
 
@@ -87,7 +93,7 @@ pub struct RegionOfInterest {
     pub capture_dimensions: (i32, i32),
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct CaptureParams {
     pub flip: Flip,
     pub exposure_duration: std::time::Duration,
@@ -96,12 +102,25 @@ pub struct CaptureParams {
     pub offset: Offset,
 }
 
+impl CaptureParams {
+    pub fn new() -> CaptureParams {
+        CaptureParams{flip: Flip::None,
+                      exposure_duration: Duration::from_millis(100),
+                      roi: RegionOfInterest{binning: BinFactor::X1,
+                                            capture_dimensions: (-1, -1),
+                                            capture_startpos: (0, 0)},
+                      gain: Gain::new(0),
+                      offset: Offset::new(0),
+        }
+    }
+}
+
 pub struct CapturedImage {
     /// The parameters that were in effect when the image capture
     /// occurred.
     pub capture_params: CaptureParams,
 
-    /// Pixel data stored in row major order.
+    /// Pixel data stored in row major order. TODO: use GrayImage?
     pub image_data: Vec<u8>,
 
     pub readout_time: std::time::SystemTime,
