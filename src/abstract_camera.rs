@@ -139,8 +139,13 @@ pub trait AbstractCamera {
     /// "ASI120mm mini", "RPiCam2", etc.
     fn model(&self) -> Result<String, CanonicalError>;
 
-    /// Returns the (width, height) of this camera type's sensor.
+    /// Returns the (width, height) non-binned pixel count of this camera type's
+    /// sensor.
     fn dimensions(&self) -> (i32, i32);
+
+    /// Returns the (width, height) dimensions, in mm, of this camera type's
+    /// sensor.
+    fn sensor_size(&self) -> (f32, f32);
 
     /// Identifies the gain value that maximizes signal-to-noise performance
     /// for this camera type. See https://www.youtube.com/watch?v=SYQ1i4k62eI

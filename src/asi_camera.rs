@@ -300,6 +300,14 @@ impl AbstractCamera for ASICamera {
         (state.info.MaxWidth as i32, state.info.MaxHeight as i32)
     }
 
+    fn sensor_size(&self) -> (f32, f32) {
+        let (width, height) = self.dimensions();
+        let state = self.state.lock().unwrap();
+        let pixel_size_microns = state.info.PixelSize as f64;
+        ((width as f64 * pixel_size_microns / 1000.0) as f32,
+         (height as f64 * pixel_size_microns / 1000.0) as f32)
+    }
+
     fn optimal_gain(&self) -> Gain {
         let state = self.state.lock().unwrap();
         // We could do a match of the model() and research the optimal gain value
@@ -401,7 +409,6 @@ impl AbstractCamera for ASICamera {
         if self.video_capture_thread.is_none() {
             return Ok(());
         }
-        info!("Stopping video capture");
         {
             let mut state = self.state.lock().unwrap();
             state.stop_request = true;
