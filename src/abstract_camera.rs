@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
 use std::fmt;
+use std::rc::Rc;
 use std::time::Duration;
 
+use image::GrayImage;
 use canonical_error::CanonicalError;
 
 /// Abstract camera gain values range from 0 to 100, inclusive. Each camera type
@@ -120,8 +122,8 @@ pub struct CapturedImage {
     /// occurred.
     pub capture_params: CaptureParams,
 
-    /// Pixel data stored in row major order. TODO: use GrayImage?
-    pub image_data: Vec<u8>,
+    /// Pixel data stored in row major order.
+    pub image: GrayImage,
 
     pub readout_time: std::time::SystemTime,
     pub temperature: Celsius,
@@ -200,7 +202,7 @@ pub trait AbstractCamera {
     /// Longer: The first call to capture_image(), or the next call to
     ///     capture_image() after changing certain settings, can incur significant
     ///     delay beyond the exposure duration.
-    fn capture_image(&mut self) -> Result<CapturedImage, CanonicalError>;
+    fn capture_image(&mut self) -> Result<Rc<CapturedImage>, CanonicalError>;
 
     /// Some implementations can shut down the camera to save power, e.g. by
     /// discontinuing video mode. A subsequent call to capture_image() will

@@ -1,10 +1,12 @@
 use canonical_error::{CanonicalError, failed_precondition_error};
 
 use std::ffi::CStr;
+use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use image::GrayImage;
 use log::{error, info, warn};
 
 use asi_camera2::asi_camera2_sdk;
@@ -246,7 +248,9 @@ impl ASICamera {
                 let mut locked_state = state.lock().unwrap();
                 locked_state.most_recent_capture = Some(CapturedImage {
                     capture_params: locked_state.camera_settings,
-                    image_data: image_data,
+                    image: GrayImage::from_raw(
+                        capture_width as u32, capture_height as u32,
+                        image_data).unwrap(),
                     readout_time: SystemTime::now(),
                     temperature: temp,
                 });
@@ -384,7 +388,7 @@ impl AbstractCamera for ASICamera {
         state.camera_settings.offset
     }
 
-    fn capture_image(&mut self) -> Result<CapturedImage, CanonicalError> {
+    fn capture_image(&mut self) -> Result<Rc<CapturedImage>, CanonicalError> {
         let mut state = self.state.lock().unwrap();
         // Start video capture thread if not yet started.
         if self.video_capture_thread.is_none() {
@@ -402,7 +406,7 @@ impl AbstractCamera for ASICamera {
             state = self.capture_done.wait(state).unwrap();
         }
         // Consume it.
-        Ok(state.most_recent_capture.take().unwrap())
+        Ok(Rc::new(state.most_recent_capture.take().unwrap()))
     }
 
     fn stop(&mut self) -> Result<(), CanonicalError> {
