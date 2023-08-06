@@ -209,3 +209,7 @@ pub trait AbstractCamera {
     /// Many implementations will treat stop() as a no-op.
     fn stop(&mut self) -> Result<(), CanonicalError>;
 }
+
+// TODO: Mechanism to discover attached cameras and enumerate their properties.
+// Extensible for new camera types. Factory function to create an AbstractCamera
+// for a given camera index.
