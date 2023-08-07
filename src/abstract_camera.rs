@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use std::fmt;
-use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use image::GrayImage;
 use canonical_error::CanonicalError;
@@ -98,7 +98,7 @@ pub struct RegionOfInterest {
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct CaptureParams {
     pub flip: Flip,
-    pub exposure_duration: std::time::Duration,
+    pub exposure_duration: Duration,
     pub roi: RegionOfInterest,
     pub gain: Gain,
     pub offset: Offset,
@@ -125,7 +125,7 @@ pub struct CapturedImage {
     /// Pixel data stored in row major order.
     pub image: GrayImage,
 
-    pub readout_time: std::time::SystemTime,
+    pub readout_time: SystemTime,
     pub temperature: Celsius,
 }
 
@@ -134,7 +134,9 @@ pub struct CapturedImage {
 /// and capturing images.
 /// Note that we do not provide a 'gamma' setting; all AbstractCamera implementations
 /// should configure the camera for linear mapping.
-pub trait AbstractCamera {
+///
+/// Implementations of AbstractCamera must be thread safe.
+pub trait AbstractCamera: Send + Sync {
     // Unchanging attributes.
 
     /// Returns a string identifying what kind of camera this is. e.g.
@@ -162,10 +164,10 @@ pub trait AbstractCamera {
 
     /// Returns InvalidArgument if specified exposure duration cannot be
     /// implemented by this camera type. Default is 100ms.
-    fn set_exposure_duration(&mut self, exp_duration: std::time::Duration)
+    fn set_exposure_duration(&mut self, exp_duration: Duration)
                              -> Result<(), CanonicalError>;
     /// Returns the exposure duration to be used for the next exposure.
-    fn get_exposure_duration(&self) -> std::time::Duration;
+    fn get_exposure_duration(&self) -> Duration;
 
     /// Default is unbinned, whole image. When setting region of interest,
     /// the implementation should adjust capture_startpos and/or capture_dimensions
@@ -202,7 +204,7 @@ pub trait AbstractCamera {
     /// Longer: The first call to capture_image(), or the next call to
     ///     capture_image() after changing certain settings, can incur significant
     ///     delay beyond the exposure duration.
-    fn capture_image(&mut self) -> Result<Rc<CapturedImage>, CanonicalError>;
+    fn capture_image(&mut self) -> Result<Arc<CapturedImage>, CanonicalError>;
 
     /// Some implementations can shut down the camera to save power, e.g. by
     /// discontinuing video mode. A subsequent call to capture_image() will

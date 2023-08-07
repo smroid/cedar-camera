@@ -1,7 +1,6 @@
 use canonical_error::{CanonicalError, failed_precondition_error};
 
 use std::ffi::CStr;
-use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -35,6 +34,9 @@ struct SharedState {
 
     // Camera settings in effect when the in-progress capture started.
     current_capture_settings: CaptureParams,
+
+    // Our video capture thread. Executes video_capture_thread_worker().
+    video_capture_thread: Option<thread::JoinHandle<()>>,
 }
 
 pub struct ASICamera {
@@ -46,11 +48,8 @@ pub struct ASICamera {
     state: Arc<Mutex<SharedState>>,
 
     // Condition variable signalled whenever `state.most_recent_capture` is
-    // populated.
+    // populated; also signalled when the worker thread exits.
     capture_done: Arc<Condvar>,
-
-    // Our video capture thread. Executes video_capture_thread_worker().
-    video_capture_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl ASICamera {
@@ -97,9 +96,10 @@ impl ASICamera {
                 most_recent_capture: None,
                 stop_request: false,
                 current_capture_settings: CaptureParams::new(),
+                video_capture_thread: None,
             })),
             capture_done: Arc::new(Condvar::new()),
-            video_capture_thread: None};
+        };
         cam.set_gain(cam.optimal_gain())?;
         let mut roi = cam.get_region_of_interest();
         roi.capture_dimensions = cam.dimensions();
@@ -135,6 +135,8 @@ impl ASICamera {
                             warn!("Error stopping video capture: {}", &e.to_string())
                     }
                     locked_state.stop_request = false;
+                    locked_state.video_capture_thread = None;
+                    capture_done.notify_all();
                     return;
                 }
                 let new_settings = &locked_state.camera_settings;
@@ -216,6 +218,7 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => {
                             error!("Error starting video capture: {}", &e.to_string());
+                            locked_state.video_capture_thread = None;
                             return;  // Abandon thread execution!
                         }
                     }
@@ -388,14 +391,14 @@ impl AbstractCamera for ASICamera {
         state.camera_settings.offset
     }
 
-    fn capture_image(&mut self) -> Result<Rc<CapturedImage>, CanonicalError> {
+    fn capture_image(&mut self) -> Result<Arc<CapturedImage>, CanonicalError> {
         let mut state = self.state.lock().unwrap();
         // Start video capture thread if not yet started.
-        if self.video_capture_thread.is_none() {
+        if state.video_capture_thread.is_none() {
             let cloned_state = self.state.clone();
             let cloned_sdk = self.asi_cam_sdk.clone();
             let cloned_condvar = self.capture_done.clone();
-            self.video_capture_thread = Some(thread::spawn(|| {
+            state.video_capture_thread = Some(thread::spawn(|| {
                 ASICamera::video_capture_thread_worker(
                     cloned_state, cloned_condvar, cloned_sdk);
             }));
@@ -406,18 +409,18 @@ impl AbstractCamera for ASICamera {
             state = self.capture_done.wait(state).unwrap();
         }
         // Consume it.
-        Ok(Rc::new(state.most_recent_capture.take().unwrap()))
+        Ok(Arc::new(state.most_recent_capture.take().unwrap()))
     }
 
     fn stop(&mut self) -> Result<(), CanonicalError> {
-        if self.video_capture_thread.is_none() {
+        let mut state = self.state.lock().unwrap();
+        if state.video_capture_thread.is_none() {
             return Ok(());
         }
-        {
-            let mut state = self.state.lock().unwrap();
-            state.stop_request = true;
+        state.stop_request = true;
+        while state.video_capture_thread.is_some() {
+            state = self.capture_done.wait(state).unwrap();
         }
-        self.video_capture_thread.take().unwrap().join().unwrap();
         Ok(())
     }
 }
