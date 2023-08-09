@@ -196,7 +196,6 @@ pub trait AbstractCamera: Send + Sync {
     /// yet a current image) if `prev_frame_id` is omitted. If `prev_frame_id`
     /// is supplied, the call blocks while the current image has the same id
     /// value.
-    /// This function blocks until an image with a different id is available.
     /// The wait time is related to the exposure duration but can be shorter or
     /// longer depending on the implementation of this camera type:
     /// Shorter: If the implementation runs the camera in video mode, a call to
