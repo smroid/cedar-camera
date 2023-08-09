@@ -26,8 +26,9 @@ struct SharedState {
     // exposure.
     camera_settings: CaptureParams,
 
-    // Most recent completed capture not yet consumed by capture_image().
-    most_recent_capture: Option<CapturedImage>,
+    // Most recent completed capture and its id value.
+    most_recent_capture: Option<Arc<CapturedImage>>,
+    frame_id: i32,
 
     // Set by stop(); the video capture thread exits when it sees this.
     stop_request: bool,
@@ -94,6 +95,7 @@ impl ASICamera {
                 info, default_gain, min_gain, max_gain,
                 camera_settings: CaptureParams::new(),
                 most_recent_capture: None,
+                frame_id: 0,
                 stop_request: false,
                 current_capture_settings: CaptureParams::new(),
                 video_capture_thread: None,
@@ -249,14 +251,15 @@ impl ASICamera {
                                 Celsius(0) }
                 };
                 let mut locked_state = state.lock().unwrap();
-                locked_state.most_recent_capture = Some(CapturedImage {
+                locked_state.most_recent_capture = Some(Arc::new(CapturedImage {
                     capture_params: locked_state.camera_settings,
                     image: GrayImage::from_raw(
                         capture_width as u32, capture_height as u32,
                         image_data).unwrap(),
                     readout_time: SystemTime::now(),
                     temperature: temp,
-                });
+                }));
+                locked_state.frame_id += 1;
                 capture_done.notify_all();
             }
         }  // loop.
@@ -391,7 +394,8 @@ impl AbstractCamera for ASICamera {
         state.camera_settings.offset
     }
 
-    fn capture_image(&mut self) -> Result<Arc<CapturedImage>, CanonicalError> {
+    fn capture_image(&mut self, prev_frame_id: Option<i32>)
+                     -> Result<(Arc<CapturedImage>, i32), CanonicalError> {
         let mut state = self.state.lock().unwrap();
         // Start video capture thread if not yet started.
         if state.video_capture_thread.is_none() {
@@ -403,13 +407,14 @@ impl AbstractCamera for ASICamera {
                     cloned_state, cloned_condvar, cloned_sdk);
             }));
         }
-        // Get the most recently posted image; wait if there is none yet after a
-        // previous capture_image() call consumed the previous one.
-        while state.most_recent_capture.is_none() {
+        // Get the most recently posted image; wait if there is none yet or the
+        // currently posted image's frame id is the same as `prev_frame_id`.
+        while state.most_recent_capture.is_none() ||
+            (prev_frame_id.is_some() && prev_frame_id.unwrap() == state.frame_id)
+        {
             state = self.capture_done.wait(state).unwrap();
         }
-        // Consume it.
-        Ok(Arc::new(state.most_recent_capture.take().unwrap()))
+        Ok((state.most_recent_capture.clone().unwrap(), state.frame_id))
     }
 
     fn stop(&mut self) -> Result<(), CanonicalError> {

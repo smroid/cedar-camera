@@ -189,22 +189,26 @@ pub trait AbstractCamera: Send + Sync {
     // Action methods.
 
     /// Obtains a single image from this camera, as configured above. The
-    /// returned image is "fresh" in that we either initiate the exposure or
-    /// we grab the next video frame exposure to complete.
-    /// This function "consumes" the image it returns. Calling this function
-    /// again obtains a new image.
-    /// This function blocks until the image is available. The wait time is
-    /// related to the exposure duration but can be shorter or longer depending
-    /// on the implementation of this camera type:
+    /// returned image is "fresh" in that we either wait for a new exposure or
+    /// return the most recently completed exposure.
+    /// This function does not "consume" the image that it returns; multiple
+    /// callers will receive the current image (or next image, if there is not
+    /// yet a current image) if `prev_frame_id` is omitted. If `prev_frame_id`
+    /// is supplied, the call blocks while the current image has the same id
+    /// value.
+    /// This function blocks until an image with a different id is available.
+    /// The wait time is related to the exposure duration but can be shorter or
+    /// longer depending on the implementation of this camera type:
     /// Shorter: If the implementation runs the camera in video mode, a call to
-    ///     capture_image() that occurs just as a video frame interval ends can
-    ///     return quickly as it does not need to wait for the video frame time
-    ///     to finish. A randomly timed call to capture_image() would only need
-    ///     to wait on average for half the exposure duration.
+    ///     capture_image() can return immediately, returning the most recently
+    ///     completed frame, or when the next frame is ready (if `prev_frame_id`
+    ///     is the same as the current frame).
     /// Longer: The first call to capture_image(), or the next call to
     ///     capture_image() after changing certain settings, can incur significant
     ///     delay beyond the exposure duration.
-    fn capture_image(&mut self) -> Result<Arc<CapturedImage>, CanonicalError>;
+    /// Returns: the captured image along with its frame_id value.
+    fn capture_image(&mut self, prev_frame_id: Option<i32>)
+                     -> Result<(Arc<CapturedImage>, i32), CanonicalError>;
 
     /// Some implementations can shut down the camera to save power, e.g. by
     /// discontinuing video mode. A subsequent call to capture_image() will

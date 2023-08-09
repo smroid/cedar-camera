@@ -32,7 +32,7 @@ fn main() {
     let exposure_time_millisec = 0.2;
     asi_camera.set_exposure_duration(Duration::from_micros(
         (exposure_time_millisec * 1000.0) as u64)).unwrap();
-    let captured_image = asi_camera.capture_image().unwrap();
+    let (captured_image, _frame_id) = asi_camera.capture_image(None).unwrap();
 
     // Move captured_image's image data into a GrayImage.
     let image = &captured_image.image;
