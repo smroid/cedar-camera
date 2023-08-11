@@ -17,8 +17,8 @@ use camera_service::asi_camera;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about=None)]
 struct Args {
-    /// Base name of the where output file. We add the gain and exposure values
-    /// to the filename and a .bmp extension.
+    /// Base name of the output file. We add the gain and exposure values to the
+    /// filename and a .bmp extension.
     #[arg(short, long)]
     output: String,
 

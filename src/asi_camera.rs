@@ -118,17 +118,22 @@ impl ASICamera {
                                    Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
         let mut sdk = asi_cam_sdk.lock().unwrap();
         let mut starting = true;
+        // Whenever we change the camera settings, we will discard the
+        // in-progress exposure, because the old settings were in effect when it
+        // started. Not only that, but ASI cameras seem to have some kind of
+        // internal pipeline, such that a few images need to be discarded after
+        // a setting change.
+        let pipeline_depth = 1;  // TODO: does this differ across ASI models?
+        let mut discard_image_count = 0;
         loop {
-            // Whenever we change the camera settings, we will discard the
-            // in-progress exposure, because the old settings were in effect
-            // when it started.
-            let mut discard_image = false;
             let capture_width;
             let capture_height;
             // Do we need to change any camera settings? This is also where
             // the initial camera settings are processed.
             {
                 let mut locked_state = state.lock().unwrap();
+                let new_settings = &locked_state.camera_settings;
+                let old_settings = &locked_state.current_capture_settings;
                 if locked_state.stop_request {
                     info!("Stopping video capture");
                     match sdk.stop_video_capture() {
@@ -136,13 +141,12 @@ impl ASICamera {
                         Err(e) =>
                             warn!("Error stopping video capture: {}", &e.to_string())
                     }
-                    locked_state.stop_request = false;
                     locked_state.video_capture_thread = None;
                     capture_done.notify_all();
+                    locked_state.stop_request = false;
                     return;
                 }
-                let new_settings = &locked_state.camera_settings;
-                let old_settings = &locked_state.current_capture_settings;
+                // Propagate changed settings, if any, into the camera.
                 if starting || new_settings.flip != old_settings.flip {
                     match sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_FLIP,
@@ -151,7 +155,7 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting flip mode: {}", &e.to_string())
                     }
-                    discard_image = true;
+                    discard_image_count = pipeline_depth;
                 }
                 if starting ||
                     new_settings.exposure_duration != old_settings.exposure_duration
@@ -163,7 +167,7 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting exposure: {}", &e.to_string())
                     }
-                    discard_image = true;
+                    discard_image_count = pipeline_depth;
                 }
                 let new_roi = &new_settings.roi;
                 let old_roi = &old_settings.roi;
@@ -177,20 +181,18 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting ROI: {}", &e.to_string())
                     }
-                    discard_image = true;
+                    discard_image_count = pipeline_depth;
                 }
                 (capture_width, capture_height) = new_roi.capture_dimensions;
-                if starting || new_roi.capture_startpos != old_roi.capture_startpos
-                {
+                if starting || new_roi.capture_startpos != old_roi.capture_startpos {
                     match sdk.set_start_pos(
                         new_roi.capture_startpos.0, new_roi.capture_startpos.1) {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting ROI startpos: {}", &e.to_string())
                     }
-                    discard_image = true;
+                    discard_image_count = pipeline_depth;
                 }
-                if starting || new_settings.gain != old_settings.gain
-                {
+                if starting || new_settings.gain != old_settings.gain {
                     match sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN,
                         Self::sdk_gain(new_settings.gain.value(),
@@ -199,10 +201,9 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting gain: {}", &e.to_string())
                     }
-                    discard_image = true;
+                    discard_image_count = pipeline_depth;
                 }
-                if starting || new_settings.offset != old_settings.offset
-                {
+                if starting || new_settings.offset != old_settings.offset {
                     match sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_OFFSET,
                         new_settings.offset.value() as i64,
@@ -210,12 +211,16 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting offset: {}", &e.to_string())
                     }
-                    discard_image = true;
+                    discard_image_count = pipeline_depth;
+                }
+                if discard_image_count > 0 {
+                    // Get rid of previously captured image, if any. We'll also
+                    // discard the currently exposing image below.
+                    locked_state.most_recent_capture = None;
                 }
                 // We're done processing the new settings, they're now current.
                 locked_state.current_capture_settings = locked_state.camera_settings;
                 if starting {
-                    info!("Starting video capture");
                     match sdk.start_video_capture() {
                         Ok(()) => (),
                         Err(e) => {
@@ -224,26 +229,27 @@ impl ASICamera {
                             return;  // Abandon thread execution!
                         }
                     }
+                    info!("Starting video capture");
                     starting = false;
                 }
-                if discard_image {
-                    // Get rid of previously captured image, if any. We'll also
-                    // discard the currently exposing image below.
-                    locked_state.most_recent_capture = None;
-                }
             }  // state.lock().
+            std::thread::sleep(Duration::from_millis(1000));  // TEMPORARY
 
             // Allocate uninitialized storage to receive the image data.
             let num_pixels = capture_width * capture_height;
             let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
             unsafe { image_data.set_len(num_pixels as usize) }
-
             match sdk.get_video_data(image_data.as_mut_ptr(), num_pixels as i64,
-                                     /*wait_ms=*/-1) {
+                                     /*wait_ms=*/1000) {
                 Ok(()) => (),
-                Err(e) => warn!("Error getting video data: {}", &e.to_string())
+                Err(e) => {
+                    warn!("Error getting video data: {}", &e.to_string());
+                    continue
+                }
             }
-            if !discard_image {
+            if discard_image_count > 0 {
+                discard_image_count -= 1;
+            } else {
                 let temp = match sdk.get_control_value(
                     asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_TEMPERATURE) {
                     Ok(x) => { Celsius((x.0 / 10) as i32) },
