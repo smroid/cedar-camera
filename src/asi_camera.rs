@@ -1,7 +1,7 @@
 use canonical_error::{CanonicalError, failed_precondition_error};
 
 use std::ffi::CStr;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -25,6 +25,7 @@ struct SharedState {
     // effect when the current exposure finishes, influencing the following
     // exposure.
     camera_settings: CaptureParams,
+    setting_changed: bool,
 
     // Most recent completed capture and its id value.
     most_recent_capture: Option<Arc<CapturedImage>>,
@@ -94,6 +95,7 @@ impl ASICamera {
             state: Arc::new(Mutex::new(SharedState{
                 info, default_gain, min_gain, max_gain,
                 camera_settings: CaptureParams::new(),
+                setting_changed: false,
                 most_recent_capture: None,
                 frame_id: 0,
                 stop_request: false,
@@ -110,6 +112,15 @@ impl ASICamera {
         Ok(cam)
     }  // new().
 
+    // This function is called whenever a camera setting is changed. The most
+    // recently captured image is invalidated, and the next call to capture_image()
+    // will wait for the setting change to be reflected in the captured image
+    // stream.
+    fn changed_setting(locked_state: &mut MutexGuard<SharedState>) {
+        locked_state.setting_changed = true;
+        locked_state.most_recent_capture = None;
+    }
+
     // The first call to capture_image() starts the video capture thread that
     // executes this function.
     fn video_capture_thread_worker(state: Arc<Mutex<SharedState>>,
@@ -118,12 +129,12 @@ impl ASICamera {
                                    Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
         let mut sdk = asi_cam_sdk.lock().unwrap();
         let mut starting = true;
-        // Whenever we change the camera settings, we will discard the
+        // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
         // started. Not only that, but ASI cameras seem to have some kind of
         // internal pipeline, such that a few images need to be discarded after
         // a setting change.
-        let pipeline_depth = 1;  // TODO: does this differ across ASI models?
+        let pipeline_depth = 2;  // TODO: does this differ across ASI models?
         let mut discard_image_count = 0;
         loop {
             let capture_width;
@@ -155,7 +166,6 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting flip mode: {}", &e.to_string())
                     }
-                    discard_image_count = pipeline_depth;
                 }
                 if starting ||
                     new_settings.exposure_duration != old_settings.exposure_duration
@@ -167,7 +177,6 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting exposure: {}", &e.to_string())
                     }
-                    discard_image_count = pipeline_depth;
                 }
                 let new_roi = &new_settings.roi;
                 let old_roi = &old_settings.roi;
@@ -181,7 +190,6 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting ROI: {}", &e.to_string())
                     }
-                    discard_image_count = pipeline_depth;
                 }
                 (capture_width, capture_height) = new_roi.capture_dimensions;
                 if starting || new_roi.capture_startpos != old_roi.capture_startpos {
@@ -190,7 +198,6 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting ROI startpos: {}", &e.to_string())
                     }
-                    discard_image_count = pipeline_depth;
                 }
                 if starting || new_settings.gain != old_settings.gain {
                     match sdk.set_control_value(
@@ -201,7 +208,6 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting gain: {}", &e.to_string())
                     }
-                    discard_image_count = pipeline_depth;
                 }
                 if starting || new_settings.offset != old_settings.offset {
                     match sdk.set_control_value(
@@ -211,12 +217,6 @@ impl ASICamera {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting offset: {}", &e.to_string())
                     }
-                    discard_image_count = pipeline_depth;
-                }
-                if discard_image_count > 0 {
-                    // Get rid of previously captured image, if any. We'll also
-                    // discard the currently exposing image below.
-                    locked_state.most_recent_capture = None;
                 }
                 // We're done processing the new settings, they're now current.
                 locked_state.current_capture_settings = locked_state.camera_settings;
@@ -233,7 +233,6 @@ impl ASICamera {
                     starting = false;
                 }
             }  // state.lock().
-            std::thread::sleep(Duration::from_millis(1000));  // TEMPORARY
 
             // Allocate uninitialized storage to receive the image data.
             let num_pixels = capture_width * capture_height;
@@ -250,23 +249,29 @@ impl ASICamera {
             if discard_image_count > 0 {
                 discard_image_count -= 1;
             } else {
-                let temp = match sdk.get_control_value(
-                    asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_TEMPERATURE) {
-                    Ok(x) => { Celsius((x.0 / 10) as i32) },
-                    Err(e) => { warn!("Error getting temperature: {}", &e.to_string());
-                                Celsius(0) }
-                };
                 let mut locked_state = state.lock().unwrap();
-                locked_state.most_recent_capture = Some(Arc::new(CapturedImage {
-                    capture_params: locked_state.camera_settings,
-                    image: GrayImage::from_raw(
-                        capture_width as u32, capture_height as u32,
-                        image_data).unwrap(),
-                    readout_time: SystemTime::now(),
-                    temperature: temp,
-                }));
-                locked_state.frame_id += 1;
-                capture_done.notify_all();
+                if locked_state.setting_changed {
+                    discard_image_count = pipeline_depth;
+                    locked_state.setting_changed = false;
+                } else {
+                    let temp = match sdk.get_control_value(
+                        asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_TEMPERATURE) {
+                        Ok(x) => { Celsius((x.0 / 10) as i32) },
+                        Err(e) => { warn!("Error getting temperature: {}",
+                                          &e.to_string());
+                                    Celsius(0) }
+                    };
+                    locked_state.most_recent_capture = Some(Arc::new(CapturedImage {
+                        capture_params: locked_state.camera_settings,
+                        image: GrayImage::from_raw(
+                            capture_width as u32, capture_height as u32,
+                            image_data).unwrap(),
+                        readout_time: SystemTime::now(),
+                        temperature: temp,
+                    }));
+                    locked_state.frame_id += 1;
+                    capture_done.notify_all();
+                }
             }
         }  // loop.
     }  // video_capture_thread_worker().
@@ -342,6 +347,7 @@ impl AbstractCamera for ASICamera {
     fn set_flip_mode(&mut self, flip_mode: Flip) -> Result<(), CanonicalError> {
         let mut state = self.state.lock().unwrap();
         state.camera_settings.flip = flip_mode;
+        ASICamera::changed_setting(&mut state);
         Ok(())
     }
     fn get_flip_mode(&self) -> Flip {
@@ -353,6 +359,7 @@ impl AbstractCamera for ASICamera {
                              -> Result<(), CanonicalError> {
         let mut state = self.state.lock().unwrap();
         state.camera_settings.exposure_duration = exp_duration;
+        ASICamera::changed_setting(&mut state);
         Ok(())
     }
     fn get_exposure_duration(&self) -> Duration {
@@ -373,6 +380,7 @@ impl AbstractCamera for ASICamera {
         // must be 0. We punt on this for now.
         roi.capture_dimensions = (roi_width, roi_height);
         state.camera_settings.roi = roi;
+        ASICamera::changed_setting(&mut state);
         Ok(state.camera_settings.roi)
     }
     fn get_region_of_interest(&self) -> RegionOfInterest {
@@ -383,6 +391,7 @@ impl AbstractCamera for ASICamera {
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
         let mut state = self.state.lock().unwrap();
         state.camera_settings.gain = gain;
+        ASICamera::changed_setting(&mut state);
         Ok(())
     }
     fn get_gain(&self) -> Gain {
@@ -393,6 +402,7 @@ impl AbstractCamera for ASICamera {
     fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError> {
         let mut state = self.state.lock().unwrap();
         state.camera_settings.offset = offset;
+        ASICamera::changed_setting(&mut state);
         Ok(())
     }
     fn get_offset(&self) -> Offset {
