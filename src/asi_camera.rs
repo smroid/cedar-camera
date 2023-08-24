@@ -157,6 +157,11 @@ impl ASICamera {
                     locked_state.stop_request = false;
                     return;
                 }
+                // TODO: another stopping condition can be: if no
+                // capture_image() calls are seen for more than N seconds, stop.
+                // The next capture_image() call will restart the capture
+                // thread.
+
                 // Propagate changed settings, if any, into the camera.
                 if starting || new_settings.flip != old_settings.flip {
                     match sdk.set_control_value(
