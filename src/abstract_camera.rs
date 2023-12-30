@@ -158,7 +158,7 @@ pub trait AbstractCamera: Send + Sync {
 
     // Changeable parameters that influence subsequent image captures.
 
-    /// Default is None.
+    /// Default is Flip::None.
     fn set_flip_mode(&mut self, flip_mode: Flip) -> Result<(), CanonicalError>;
     fn get_flip_mode(&self) -> Flip;
 
