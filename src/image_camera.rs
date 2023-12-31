@@ -1,4 +1,4 @@
-// Fake camera that yields a fixed image loaded from a file.
+// Fake camera that yields a fixed image. For testing.
 
 use std::time::{Duration, SystemTime};
 use std::sync::Arc;
@@ -51,9 +51,9 @@ impl AbstractCamera for ImageCamera {
         Flip::None
     }
 
-    fn set_exposure_duration(&mut self, exp_duration: Duration)
+    fn set_exposure_duration(&mut self, _exp_duration: Duration)
                              -> Result<(), CanonicalError> {
-        self.exposure_duration = exp_duration;
+        // Quietly ignore.
         Ok(())
     }
     fn get_exposure_duration(&self) -> Duration {
