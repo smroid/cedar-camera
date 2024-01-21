@@ -14,13 +14,6 @@ use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedI
 
 // State shared between video capture thread and the ASICamera methods.
 struct SharedState {
-    // Unchanging camera info.
-    info: asi_camera2_sdk::ASI_CAMERA_INFO,
-    // Gain values in SDK units.
-    default_gain: i32,
-    min_gain: i32,
-    max_gain: i32,
-
     // Current camera settings as set via ASICamera methods. Will be put into
     // effect when the current exposure finishes, influencing the following
     // exposure.
@@ -45,6 +38,13 @@ pub struct ASICamera {
     // The SDK wrapper object. After initialization, the video capture thread is
     // the only thing that touches asi_cam_sdk.
     asi_cam_sdk: Arc<Mutex<asi_camera2_sdk::ASICamera>>,
+
+    // Unchanging camera info.
+    info: asi_camera2_sdk::ASI_CAMERA_INFO,
+    // Gain values in SDK units.
+    default_gain: i32,
+    min_gain: i32,
+    max_gain: i32,
 
     // Our state, shared between ASICamera methods and the video capture thread.
     state: Arc<Mutex<SharedState>>,
@@ -92,8 +92,8 @@ impl ASICamera {
         }
         let mut cam = ASICamera{
             asi_cam_sdk: Arc::new(Mutex::new(asi_cam_sdk)),
+            info, default_gain, min_gain, max_gain,
             state: Arc::new(Mutex::new(SharedState{
-                info, default_gain, min_gain, max_gain,
                 camera_settings: CaptureParams::new(),
                 setting_changed: false,
                 most_recent_capture: None,
@@ -123,7 +123,8 @@ impl ASICamera {
 
     // The first call to capture_image() starts the video capture thread that
     // executes this function.
-    fn video_capture_thread_worker(state: Arc<Mutex<SharedState>>,
+    fn video_capture_thread_worker(min_gain: i32, max_gain: i32,
+                                   state: Arc<Mutex<SharedState>>,
                                    capture_done: Arc<Condvar>,
                                    asi_cam_sdk:
                                    Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
@@ -208,7 +209,7 @@ impl ASICamera {
                     match sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN,
                         Self::sdk_gain(new_settings.gain.value(),
-                                       locked_state.min_gain, locked_state.max_gain),
+                                       min_gain, max_gain),
                         /*auto=*/false) {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting gain: {}", &e.to_string())
@@ -316,36 +317,28 @@ impl Drop for ASICamera {
 
 impl AbstractCamera for ASICamera {
     fn model(&self) -> Result<String, CanonicalError> {
-        let state = self.state.lock().unwrap();
-        let cstr = CStr::from_bytes_until_nul(&state.info.Name).unwrap();
+        let cstr = CStr::from_bytes_until_nul(&self.info.Name).unwrap();
         Ok(cstr.to_str().unwrap().to_owned())
     }
 
     fn dimensions(&self) -> (i32, i32) {
-        let state = self.state.lock().unwrap();
-        (state.info.MaxWidth as i32, state.info.MaxHeight as i32)
+        (self.info.MaxWidth as i32, self.info.MaxHeight as i32)
     }
 
     fn sensor_size(&self) -> (f32, f32) {
         let (width, height) = self.dimensions();
-        let state = self.state.lock().unwrap();
-        let pixel_size_microns = state.info.PixelSize as f64;
+        let pixel_size_microns = self.info.PixelSize as f64;
         ((width as f64 * pixel_size_microns / 1000.0) as f32,
          (height as f64 * pixel_size_microns / 1000.0) as f32)
     }
 
     fn optimal_gain(&self) -> Gain {
-        let state = self.state.lock().unwrap();
         // We could do a match of the model() and research the optimal gain value
         // for each. Instead, we just grab ASI's default gain value according to
         // the SDK.
-        // The camera might not use 0..100 for range of gain values.
-        if state.min_gain == 0 && state.max_gain == 100 {
-            return Gain::new(state.default_gain as i32);
-        }
         // Normalize default_gain according to our 0..100 range.
-        let frac = (state.default_gain - state.min_gain) as f64 /
-            (state.max_gain - state.min_gain) as f64;
+        let frac = (self.default_gain - self.min_gain) as f64 /
+            (self.max_gain - self.min_gain) as f64;
         Gain::new((100.0 * frac) as i32)
     }
 
@@ -420,12 +413,14 @@ impl AbstractCamera for ASICamera {
         let mut state = self.state.lock().unwrap();
         // Start video capture thread if not yet started.
         if state.video_capture_thread.is_none() {
+            let min_gain = self.min_gain;
+            let max_gain = self.max_gain;
             let cloned_state = self.state.clone();
             let cloned_sdk = self.asi_cam_sdk.clone();
             let cloned_condvar = self.capture_done.clone();
-            state.video_capture_thread = Some(thread::spawn(|| {
+            state.video_capture_thread = Some(thread::spawn(move || {
                 ASICamera::video_capture_thread_worker(
-                    cloned_state, cloned_condvar, cloned_sdk);
+                    min_gain, max_gain, cloned_state, cloned_condvar, cloned_sdk);
             }));
         }
         // Get the most recently posted image; wait if there is none yet or the
