@@ -10,17 +10,17 @@ use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedI
                              Celsius, Flip, Gain, Offset, RegionOfInterest};
 
 pub struct ImageCamera {
-    image: GrayImage,
+    image: Arc<GrayImage>,
     exposure_duration: Duration,
 
     // Most recent completed capture and its id value.
-    most_recent_capture: Option<Arc<CapturedImage>>,
+    most_recent_capture: Option<CapturedImage>,
     frame_id: i32,
 }
 
 impl ImageCamera {
     pub fn new(image: GrayImage) -> Result<Self, CanonicalError> {
-        Ok(ImageCamera{image,
+        Ok(ImageCamera{image: Arc::new(image),
                        exposure_duration: Duration::from_millis(100),
                        most_recent_capture: None,
                        frame_id: 0,})
@@ -85,14 +85,14 @@ impl AbstractCamera for ImageCamera {
     }
 
     fn capture_image(&mut self, prev_frame_id: Option<i32>)
-                     -> Result<(Arc<CapturedImage>, i32), CanonicalError> {
+                     -> Result<(CapturedImage, i32), CanonicalError> {
         if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
             std::thread::sleep(self.exposure_duration);
             self.frame_id += 1;
             self.most_recent_capture = None;
         }
         if self.most_recent_capture.is_none() {
-            self.most_recent_capture = Some(Arc::new(CapturedImage {
+            self.most_recent_capture = Some(CapturedImage {
                 capture_params: CaptureParams {
                     flip: Flip::None,
                     exposure_duration: self.get_exposure_duration(),
@@ -103,7 +103,7 @@ impl AbstractCamera for ImageCamera {
                 image: self.image.clone(),
                 readout_time: SystemTime::now(),
                 temperature: Celsius(20),
-            }));
+            });
         }
         Ok((self.most_recent_capture.clone().unwrap(), self.frame_id))
     }

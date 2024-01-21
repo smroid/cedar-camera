@@ -21,7 +21,7 @@ struct SharedState {
     setting_changed: bool,
 
     // Most recent completed capture and its id value.
-    most_recent_capture: Option<Arc<CapturedImage>>,
+    most_recent_capture: Option<CapturedImage>,
     frame_id: i32,
 
     // Set by stop(); the video capture thread exits when it sees this.
@@ -267,14 +267,14 @@ impl ASICamera {
                                           &e.to_string());
                                     Celsius(0) }
                     };
-                    locked_state.most_recent_capture = Some(Arc::new(CapturedImage {
+                    locked_state.most_recent_capture = Some(CapturedImage {
                         capture_params: locked_state.camera_settings,
-                        image: GrayImage::from_raw(
+                        image: Arc::new(GrayImage::from_raw(
                             capture_width as u32, capture_height as u32,
-                            image_data).unwrap(),
+                            image_data).unwrap()),
                         readout_time: SystemTime::now(),
                         temperature: temp,
-                    }));
+                    });
                     locked_state.frame_id += 1;
                     capture_done.notify_all();
                 }
@@ -409,7 +409,7 @@ impl AbstractCamera for ASICamera {
     }
 
     fn capture_image(&mut self, prev_frame_id: Option<i32>)
-                     -> Result<(Arc<CapturedImage>, i32), CanonicalError> {
+                     -> Result<(CapturedImage, i32), CanonicalError> {
         let mut state = self.state.lock().unwrap();
         // Start video capture thread if not yet started.
         if state.video_capture_thread.is_none() {

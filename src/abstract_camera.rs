@@ -117,13 +117,14 @@ impl CaptureParams {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct CapturedImage {
     /// The parameters that were in effect when the image capture
     /// occurred.
     pub capture_params: CaptureParams,
 
     /// Pixel data stored in row major order.
-    pub image: GrayImage,
+    pub image: Arc<GrayImage>,
 
     pub readout_time: SystemTime,
     pub temperature: Celsius,
@@ -207,7 +208,7 @@ pub trait AbstractCamera: Send + Sync {
     ///     delay beyond the exposure duration.
     /// Returns: the captured image along with its frame_id value.
     fn capture_image(&mut self, prev_frame_id: Option<i32>)
-                     -> Result<(Arc<CapturedImage>, i32), CanonicalError>;
+                     -> Result<(CapturedImage, i32), CanonicalError>;
 
     /// Some implementations can shut down the camera to save power, e.g. by
     /// discontinuing video mode. A subsequent call to capture_image() will
