@@ -1,5 +1,3 @@
-extern crate chrono;
-
 use std::time::Duration;
 
 use clap::Parser;
@@ -21,7 +19,8 @@ struct Args {
     output: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
@@ -45,7 +44,7 @@ fn main() {
             asi_camera.set_exposure_duration(Duration::from_micros(
                 exp_ms as u64 * 1000)).unwrap();
             let (captured_image, new_frame_id) =
-                asi_camera.capture_image(Some(frame_id)).unwrap();
+                asi_camera.capture_image(Some(frame_id)).await.unwrap();
             frame_id = new_frame_id;
 
             // Move captured_image's image data into a GrayImage.

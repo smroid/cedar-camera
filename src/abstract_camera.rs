@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-
-use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -12,12 +9,6 @@ use canonical_error::CanonicalError;
 /// to its highest gain.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Gain(i32);
-
-impl fmt::Display for Gain {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)  // Just re-use Debug.
-    }
-}
 
 impl Gain {
     pub fn new(gain: i32) -> Gain {
@@ -37,12 +28,6 @@ impl Gain {
 /// dark pixels to black.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Offset(i32);
-
-impl fmt::Display for Offset {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)  // Just re-use Debug.
-    }
-}
 
 impl Offset {
     pub fn new(offset: i32) -> Offset {
@@ -135,9 +120,8 @@ pub struct CapturedImage {
 /// and capturing images.
 /// Note that we do not provide a 'gamma' setting; all AbstractCamera implementations
 /// should configure the camera for linear mapping.
-///
-/// Implementations of AbstractCamera must be thread safe.
-pub trait AbstractCamera: Send + Sync {
+#[trait_variant::make(AbstractCamera: Send)]
+pub trait LocalAbstractCamera: {
     // Unchanging attributes.
 
     /// Returns a string identifying what kind of camera this is. e.g.
@@ -207,8 +191,8 @@ pub trait AbstractCamera: Send + Sync {
     ///     capture_image() after changing certain settings, can incur significant
     ///     delay beyond the exposure duration.
     /// Returns: the captured image along with its frame_id value.
-    fn capture_image(&mut self, prev_frame_id: Option<i32>)
-                     -> Result<(CapturedImage, i32), CanonicalError>;
+    async fn capture_image(&mut self, prev_frame_id: Option<i32>)
+                           -> Result<(CapturedImage, i32), CanonicalError>;
 
     /// Some implementations can shut down the camera to save power, e.g. by
     /// discontinuing video mode. A subsequent call to capture_image() will

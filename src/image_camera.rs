@@ -53,8 +53,7 @@ impl AbstractCamera for ImageCamera {
 
     fn set_exposure_duration(&mut self, _exp_duration: Duration)
                              -> Result<(), CanonicalError> {
-        // Quietly ignore.
-        Ok(())
+        Ok(())  // Quietly ignore.
     }
     fn get_exposure_duration(&self) -> Duration {
         self.exposure_duration
@@ -84,10 +83,10 @@ impl AbstractCamera for ImageCamera {
         Offset::new(0)
     }
 
-    fn capture_image(&mut self, prev_frame_id: Option<i32>)
-                     -> Result<(CapturedImage, i32), CanonicalError> {
+    async fn capture_image(&mut self, prev_frame_id: Option<i32>)
+                           -> Result<(CapturedImage, i32), CanonicalError> {
         if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
-            std::thread::sleep(self.exposure_duration);
+            tokio::time::sleep(self.exposure_duration).await;
             self.frame_id += 1;
             self.most_recent_capture = None;
         }

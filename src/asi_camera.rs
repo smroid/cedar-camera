@@ -1,7 +1,7 @@
 use canonical_error::{CanonicalError, failed_precondition_error};
 
 use std::ffi::CStr;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -29,9 +29,6 @@ struct SharedState {
 
     // Camera settings in effect when the in-progress capture started.
     current_capture_settings: CaptureParams,
-
-    // Our video capture thread. Executes video_capture_thread_worker().
-    video_capture_thread: Option<thread::JoinHandle<()>>,
 }
 
 pub struct ASICamera {
@@ -49,9 +46,11 @@ pub struct ASICamera {
     // Our state, shared between ASICamera methods and the video capture thread.
     state: Arc<Mutex<SharedState>>,
 
-    // Condition variable signalled whenever `state.most_recent_capture` is
-    // populated; also signalled when the worker thread exits.
-    capture_done: Arc<Condvar>,
+    // Notified whenever `state.most_recent_capture` is populated.
+    notify: Arc<tokio::sync::Notify>,
+
+    // Our video capture thread. Executes worker().
+    video_capture_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl ASICamera {
@@ -100,9 +99,9 @@ impl ASICamera {
                 frame_id: 0,
                 stop_request: false,
                 current_capture_settings: CaptureParams::new(),
-                video_capture_thread: None,
             })),
-            capture_done: Arc::new(Condvar::new()),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            video_capture_thread: None,
         };
         cam.set_gain(cam.optimal_gain())?;
         let mut roi = cam.get_region_of_interest();
@@ -123,12 +122,11 @@ impl ASICamera {
 
     // The first call to capture_image() starts the video capture thread that
     // executes this function.
-    fn video_capture_thread_worker(min_gain: i32, max_gain: i32,
-                                   state: Arc<Mutex<SharedState>>,
-                                   capture_done: Arc<Condvar>,
-                                   asi_cam_sdk:
-                                   Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
-        let mut sdk = asi_cam_sdk.lock().unwrap();
+    fn worker(min_gain: i32, max_gain: i32,
+              state: Arc<Mutex<SharedState>>,
+              notify: Arc<tokio::sync::Notify>,
+              asi_cam_sdk: Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
+        let mut locked_sdk = asi_cam_sdk.lock().unwrap();
         let mut starting = true;
         // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
@@ -148,24 +146,17 @@ impl ASICamera {
                 let old_settings = &locked_state.current_capture_settings;
                 if locked_state.stop_request {
                     info!("Stopping video capture");
-                    match sdk.stop_video_capture() {
+                    match locked_sdk.stop_video_capture() {
                         Ok(()) => (),
                         Err(e) =>
                             warn!("Error stopping video capture: {}", &e.to_string())
                     }
-                    locked_state.video_capture_thread = None;
-                    capture_done.notify_all();
                     locked_state.stop_request = false;
-                    return;
+                    return;  // Exit thread.
                 }
-                // TODO: another stopping condition can be: if no
-                // capture_image() calls are seen for more than N seconds, stop.
-                // The next capture_image() call will restart the capture
-                // thread.
-
                 // Propagate changed settings, if any, into the camera.
                 if starting || new_settings.flip != old_settings.flip {
-                    match sdk.set_control_value(
+                    match locked_sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_FLIP,
                         Self::sdk_flip(new_settings.flip) as i64,
                         /*auto=*/false) {
@@ -176,7 +167,7 @@ impl ASICamera {
                 if starting ||
                     new_settings.exposure_duration != old_settings.exposure_duration
                 {
-                    match sdk.set_control_value(
+                    match locked_sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_EXPOSURE,
                         new_settings.exposure_duration.as_micros() as i64,
                         /*auto=*/false) {
@@ -189,7 +180,7 @@ impl ASICamera {
                 if starting || new_roi.binning != old_roi.binning ||
                     new_roi.capture_dimensions != old_roi.capture_dimensions
                 {
-                    match sdk.set_roi_format(
+                    match locked_sdk.set_roi_format(
                         new_roi.capture_dimensions.0, new_roi.capture_dimensions.1,
                         match new_roi.binning { BinFactor::X1 => 1, BinFactor::X2 => 2, },
                         asi_camera2_sdk::ASI_IMG_TYPE_ASI_IMG_RAW8) {
@@ -199,14 +190,14 @@ impl ASICamera {
                 }
                 (capture_width, capture_height) = new_roi.capture_dimensions;
                 if starting || new_roi.capture_startpos != old_roi.capture_startpos {
-                    match sdk.set_start_pos(
+                    match locked_sdk.set_start_pos(
                         new_roi.capture_startpos.0, new_roi.capture_startpos.1) {
                         Ok(()) => (),
                         Err(e) => warn!("Error setting ROI startpos: {}", &e.to_string())
                     }
                 }
                 if starting || new_settings.gain != old_settings.gain {
-                    match sdk.set_control_value(
+                    match locked_sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN,
                         Self::sdk_gain(new_settings.gain.value(),
                                        min_gain, max_gain),
@@ -216,7 +207,7 @@ impl ASICamera {
                     }
                 }
                 if starting || new_settings.offset != old_settings.offset {
-                    match sdk.set_control_value(
+                    match locked_sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_OFFSET,
                         new_settings.offset.value() as i64,
                         /*auto=*/false) {
@@ -227,11 +218,10 @@ impl ASICamera {
                 // We're done processing the new settings, they're now current.
                 locked_state.current_capture_settings = locked_state.camera_settings;
                 if starting {
-                    match sdk.start_video_capture() {
+                    match locked_sdk.start_video_capture() {
                         Ok(()) => (),
                         Err(e) => {
                             error!("Error starting video capture: {}", &e.to_string());
-                            locked_state.video_capture_thread = None;
                             return;  // Abandon thread execution!
                         }
                     }
@@ -244,8 +234,8 @@ impl ASICamera {
             let num_pixels = capture_width * capture_height;
             let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
             unsafe { image_data.set_len(num_pixels as usize) }
-            match sdk.get_video_data(image_data.as_mut_ptr(), num_pixels as i64,
-                                     /*wait_ms=*/1000) {
+            match locked_sdk.get_video_data(image_data.as_mut_ptr(), num_pixels as i64,
+                                            /*wait_ms=*/1000) {
                 Ok(()) => (),
                 Err(e) => {
                     warn!("Error getting video data: {}", &e.to_string());
@@ -260,7 +250,7 @@ impl ASICamera {
                     discard_image_count = pipeline_depth;
                     locked_state.setting_changed = false;
                 } else {
-                    let temp = match sdk.get_control_value(
+                    let temp = match locked_sdk.get_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_TEMPERATURE) {
                         Ok(x) => { Celsius((x.0 / 10) as i32) },
                         Err(e) => { warn!("Error getting temperature: {}",
@@ -276,11 +266,11 @@ impl ASICamera {
                         temperature: temp,
                     });
                     locked_state.frame_id += 1;
-                    capture_done.notify_all();
+                    notify.notify_waiters();
                 }
             }
         }  // loop.
-    }  // video_capture_thread_worker().
+    }  // worker().
 
     // Translate our Flip to the camera SDK's flip enum value.
     fn sdk_flip(abstract_flip: Flip) -> u32 {
@@ -408,39 +398,47 @@ impl AbstractCamera for ASICamera {
         state.camera_settings.offset
     }
 
-    fn capture_image(&mut self, prev_frame_id: Option<i32>)
-                     -> Result<(CapturedImage, i32), CanonicalError> {
-        let mut state = self.state.lock().unwrap();
-        // Start video capture thread if not yet started.
-        if state.video_capture_thread.is_none() {
+    async fn capture_image(&mut self, prev_frame_id: Option<i32>)
+                           -> Result<(CapturedImage, i32), CanonicalError> {
+        // Has the worker terminated for some reason?
+        if self.video_capture_thread.is_some() &&
+            self.video_capture_thread.as_ref().unwrap().is_finished()
+        {
+            self.video_capture_thread.take().unwrap().join().unwrap();
+        }
+        // Start video capture thread if terminated or not yet started.
+        if self.video_capture_thread.is_none() {
             let min_gain = self.min_gain;
             let max_gain = self.max_gain;
             let cloned_state = self.state.clone();
+            let cloned_notify = self.notify.clone();
             let cloned_sdk = self.asi_cam_sdk.clone();
-            let cloned_condvar = self.capture_done.clone();
-            state.video_capture_thread = Some(thread::spawn(move || {
-                ASICamera::video_capture_thread_worker(
-                    min_gain, max_gain, cloned_state, cloned_condvar, cloned_sdk);
+            self.video_capture_thread = Some(thread::spawn(move || {
+                ASICamera::worker(
+                    min_gain, max_gain, cloned_state, cloned_notify, cloned_sdk);
             }));
         }
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
-        while state.most_recent_capture.is_none() ||
-            (prev_frame_id.is_some() && prev_frame_id.unwrap() == state.frame_id)
-        {
-            state = self.capture_done.wait(state).unwrap();
+        loop {
+            {
+                let locked_state = self.state.lock().unwrap();
+                if locked_state.most_recent_capture.is_some() &&
+                    (prev_frame_id.is_none() ||
+                     prev_frame_id.unwrap() != locked_state.frame_id)
+                {
+                    return Ok((locked_state.most_recent_capture.clone().unwrap(),
+                               locked_state.frame_id));
+                }
+            }
+            self.notify.notified().await;
         }
-        Ok((state.most_recent_capture.clone().unwrap(), state.frame_id))
     }
 
     fn stop(&mut self) -> Result<(), CanonicalError> {
-        let mut state = self.state.lock().unwrap();
-        if state.video_capture_thread.is_none() {
-            return Ok(());
-        }
-        state.stop_request = true;
-        while state.video_capture_thread.is_some() {
-            state = self.capture_done.wait(state).unwrap();
+        self.state.lock().unwrap().stop_request = true;
+        if self.video_capture_thread.is_some() {
+            self.video_capture_thread.take().unwrap().join().unwrap();
         }
         Ok(())
     }

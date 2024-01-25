@@ -1,4 +1,3 @@
-extern crate chrono;
 use chrono::offset::Local;
 use chrono::DateTime;
 
@@ -35,7 +34,8 @@ struct Args {
     offset: i32,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")).init();
 
@@ -56,7 +56,7 @@ fn main() {
     let exposure_time_millisec = args.exposure_time;
     asi_camera.set_exposure_duration(Duration::from_micros(
         exposure_time_millisec as u64 * 1000)).unwrap();
-    let (captured_image, _frame_id) = asi_camera.capture_image(None).unwrap();
+    let (captured_image, _frame_id) = asi_camera.capture_image(None).await.unwrap();
 
     // Move captured_image's image data into a GrayImage.
     let image = &captured_image.image;

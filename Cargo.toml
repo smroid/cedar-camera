@@ -13,3 +13,5 @@ image = "0.24.6"
 chrono = "0.4.0"
 asi_camera2 = { version = "0.1.0", path = "../asi_camera2" }
 clap = { version = "4.3.21", features = ["derive"] }
+tokio = { version = "1.35.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+trait-variant = "0.1.1"
