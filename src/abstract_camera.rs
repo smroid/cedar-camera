@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use async_trait::async_trait;
 use image::GrayImage;
 use canonical_error::CanonicalError;
 
@@ -120,8 +121,8 @@ pub struct CapturedImage {
 /// and capturing images.
 /// Note that we do not provide a 'gamma' setting; all AbstractCamera implementations
 /// should configure the camera for linear mapping.
-#[trait_variant::make(AbstractCamera: Send)]
-pub trait LocalAbstractCamera: {
+#[async_trait]
+pub trait AbstractCamera: {
     // Unchanging attributes.
 
     /// Returns a string identifying what kind of camera this is. e.g.
@@ -199,7 +200,7 @@ pub trait LocalAbstractCamera: {
     /// re-start the camera, at the expense of that capture_image() call taking
     /// longer than usual.
     /// Many implementations will treat stop() as a no-op.
-    fn stop(&mut self) -> Result<(), CanonicalError>;
+    fn stop(&mut self);
 }
 
 // TODO: Mechanism to discover attached cameras and enumerate their properties.

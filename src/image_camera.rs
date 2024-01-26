@@ -3,6 +3,7 @@
 use std::time::{Duration, SystemTime};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use canonical_error::{CanonicalError, unimplemented_error};
 use image::GrayImage;
 
@@ -27,6 +28,7 @@ impl ImageCamera {
     }
 }
 
+#[async_trait]
 impl AbstractCamera for ImageCamera {
     fn model(&self) -> Result<String, CanonicalError> {
         Ok("ImageCamera".to_string())
@@ -107,7 +109,5 @@ impl AbstractCamera for ImageCamera {
         Ok((self.most_recent_capture.clone().unwrap(), self.frame_id))
     }
 
-    fn stop(&mut self) -> Result<(), CanonicalError> {
-        Ok(())
-    }
+    fn stop(&mut self) {}
 }

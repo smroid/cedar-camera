@@ -5,31 +5,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use async_trait::async_trait;
 use image::GrayImage;
 use log::{error, info, warn};
 
 use asi_camera2::asi_camera2_sdk;
 use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedImage,
                              Celsius, Flip, Gain, Offset, RegionOfInterest};
-
-// State shared between video capture thread and the ASICamera methods.
-struct SharedState {
-    // Current camera settings as set via ASICamera methods. Will be put into
-    // effect when the current exposure finishes, influencing the following
-    // exposure.
-    camera_settings: CaptureParams,
-    setting_changed: bool,
-
-    // Most recent completed capture and its id value.
-    most_recent_capture: Option<CapturedImage>,
-    frame_id: i32,
-
-    // Set by stop(); the video capture thread exits when it sees this.
-    stop_request: bool,
-
-    // Camera settings in effect when the in-progress capture started.
-    current_capture_settings: CaptureParams,
-}
 
 pub struct ASICamera {
     // The SDK wrapper object. After initialization, the video capture thread is
@@ -51,6 +33,25 @@ pub struct ASICamera {
 
     // Our video capture thread. Executes worker().
     video_capture_thread: Option<thread::JoinHandle<()>>,
+}
+
+// State shared between video capture thread and the ASICamera methods.
+struct SharedState {
+    // Current camera settings as set via ASICamera methods. Will be put into
+    // effect when the current exposure finishes, influencing the following
+    // exposure.
+    camera_settings: CaptureParams,
+    setting_changed: bool,
+
+    // Most recent completed capture and its id value.
+    most_recent_capture: Option<CapturedImage>,
+    frame_id: i32,
+
+    // Set by stop(); the video capture thread exits when it sees this.
+    stop_request: bool,
+
+    // Camera settings in effect when the in-progress capture started.
+    current_capture_settings: CaptureParams,
 }
 
 impl ASICamera {
@@ -299,12 +300,11 @@ impl ASICamera {
 /// We arrange to call stop() when ASICamera object goes out of scope.
 impl Drop for ASICamera {
     fn drop(&mut self) {
-        self.stop().unwrap_or_else(|err| {
-            panic!("Error stopping camera: {}", err);
-        });
+        self.stop();
     }
 }
 
+#[async_trait]
 impl AbstractCamera for ASICamera {
     fn model(&self) -> Result<String, CanonicalError> {
         let cstr = CStr::from_bytes_until_nul(&self.info.Name).unwrap();
@@ -427,6 +427,7 @@ impl AbstractCamera for ASICamera {
                     (prev_frame_id.is_none() ||
                      prev_frame_id.unwrap() != locked_state.frame_id)
                 {
+                    // Don't consume it, other clients may want it.
                     return Ok((locked_state.most_recent_capture.clone().unwrap(),
                                locked_state.frame_id));
                 }
@@ -435,11 +436,10 @@ impl AbstractCamera for ASICamera {
         }
     }
 
-    fn stop(&mut self) -> Result<(), CanonicalError> {
+    fn stop(&mut self) {
         self.state.lock().unwrap().stop_request = true;
         if self.video_capture_thread.is_some() {
             self.video_capture_thread.take().unwrap().join().unwrap();
         }
-        Ok(())
     }
 }
