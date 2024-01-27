@@ -323,13 +323,33 @@ impl AbstractCamera for ASICamera {
     }
 
     fn optimal_gain(&self) -> Gain {
+        let optimal_gain;  // In SDK units.
+        // Use the optimal gain value for each ASI camera model.
+        match self.model().unwrap().as_str() {
+            "ZWO ASI120MM Mini" => {
+                // Per graphs at
+                // https://astronomy-imaging-camera.com/product/asi120mm-mini-mono
+                // the read noise is low at this gain while the dynamic range
+                // is ~9, which is adequate for our use of 8-bit mode.
+                optimal_gain = 50;
+            },
+            _ => {
+                // Likely a decent fallback.
+                optimal_gain = self.default_gain;
+            }
+        }
+        // Normalize optimal_gain according to our 0..100 range.
+        let frac = (optimal_gain - self.min_gain) as f64 /
+            (self.max_gain - self.min_gain) as f64;
+        Gain::new((100.0 * frac) as i32)
+
         // We could do a match of the model() and research the optimal gain value
         // for each. Instead, we just grab ASI's default gain value according to
         // the SDK.
         // Normalize default_gain according to our 0..100 range.
-        let frac = (self.default_gain - self.min_gain) as f64 /
-            (self.max_gain - self.min_gain) as f64;
-        Gain::new((100.0 * frac) as i32)
+        // let frac = (self.default_gain - self.min_gain) as f64 /
+        //     (self.max_gain - self.min_gain) as f64;
+        // Gain::new((100.0 * frac) as i32)
     }
 
     fn set_flip_mode(&mut self, flip_mode: Flip) -> Result<(), CanonicalError> {
