@@ -2,7 +2,6 @@ use canonical_error::{CanonicalError, failed_precondition_error};
 
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
@@ -32,7 +31,7 @@ pub struct ASICamera {
     notify: Arc<tokio::sync::Notify>,
 
     // Our video capture thread. Executes worker().
-    video_capture_thread: Option<thread::JoinHandle<()>>,
+    video_capture_thread: Option<tokio::task::JoinHandle<()>>,
 }
 
 // State shared between video capture thread and the ASICamera methods.
@@ -300,7 +299,8 @@ impl ASICamera {
 /// We arrange to call stop() when ASICamera object goes out of scope.
 impl Drop for ASICamera {
     fn drop(&mut self) {
-        self.stop();
+        // https://stackoverflow.com/questions/71541765/rust-async-drop
+        futures::executor::block_on(self.stop());
     }
 }
 
@@ -424,7 +424,7 @@ impl AbstractCamera for ASICamera {
         if self.video_capture_thread.is_some() &&
             self.video_capture_thread.as_ref().unwrap().is_finished()
         {
-            self.video_capture_thread.take().unwrap().join().unwrap();
+            self.video_capture_thread.take().unwrap().await.unwrap();
         }
         // Start video capture thread if terminated or not yet started.
         if self.video_capture_thread.is_none() {
@@ -433,7 +433,7 @@ impl AbstractCamera for ASICamera {
             let cloned_state = self.state.clone();
             let cloned_notify = self.notify.clone();
             let cloned_sdk = self.asi_cam_sdk.clone();
-            self.video_capture_thread = Some(thread::spawn(move || {
+            self.video_capture_thread = Some(tokio::task::spawn_blocking(move || {
                 ASICamera::worker(
                     min_gain, max_gain, cloned_state, cloned_notify, cloned_sdk);
             }));
@@ -456,10 +456,10 @@ impl AbstractCamera for ASICamera {
         }
     }
 
-    fn stop(&mut self) {
-        self.state.lock().unwrap().stop_request = true;
+    async fn stop(&mut self) {
         if self.video_capture_thread.is_some() {
-            self.video_capture_thread.take().unwrap().join().unwrap();
+            self.state.lock().unwrap().stop_request = true;
+            self.video_capture_thread.take().unwrap().await.unwrap();
         }
     }
 }

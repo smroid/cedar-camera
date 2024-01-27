@@ -200,7 +200,7 @@ pub trait AbstractCamera: {
     /// re-start the camera, at the expense of that capture_image() call taking
     /// longer than usual.
     /// Many implementations will treat stop() as a no-op.
-    fn stop(&mut self);
+    async fn stop(&mut self);
 }
 
 // TODO: Mechanism to discover attached cameras and enumerate their properties.

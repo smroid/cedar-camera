@@ -109,5 +109,5 @@ impl AbstractCamera for ImageCamera {
         Ok((self.most_recent_capture.clone().unwrap(), self.frame_id))
     }
 
-    fn stop(&mut self) {}
+    async fn stop(&mut self) {}
 }
