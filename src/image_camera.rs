@@ -109,5 +109,13 @@ impl AbstractCamera for ImageCamera {
         Ok((self.most_recent_capture.clone().unwrap(), self.frame_id))
     }
 
+    fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
+        if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
+            Some(self.exposure_duration)
+        } else {
+            Some(Duration::ZERO)
+        }
+    }
+
     async fn stop(&mut self) {}
 }

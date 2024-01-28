@@ -195,6 +195,10 @@ pub trait AbstractCamera: {
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError>;
 
+    /// Returns an estimate of how long a call to capture_image() with the given
+    /// id will block. None if there is no estimate.
+    fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration>;
+
     /// Some implementations can shut down the camera to save power, e.g. by
     /// discontinuing video mode. A subsequent call to capture_image() will
     /// re-start the camera, at the expense of that capture_image() call taking

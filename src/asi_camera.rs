@@ -2,7 +2,7 @@ use canonical_error::{CanonicalError, failed_precondition_error};
 
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use image::GrayImage;
@@ -27,9 +27,6 @@ pub struct ASICamera {
     // Our state, shared between ASICamera methods and the video capture thread.
     state: Arc<Mutex<SharedState>>,
 
-    // Notified whenever `state.most_recent_capture` is populated.
-    notify: Arc<tokio::sync::Notify>,
-
     // Our video capture thread. Executes worker().
     video_capture_thread: Option<tokio::task::JoinHandle<()>>,
 }
@@ -41,6 +38,9 @@ struct SharedState {
     // exposure.
     camera_settings: CaptureParams,
     setting_changed: bool,
+
+    // Estimated time at which `most_recent_capture` will next be updated.
+    eta: Option<Instant>,
 
     // Most recent completed capture and its id value.
     most_recent_capture: Option<CapturedImage>,
@@ -95,12 +95,12 @@ impl ASICamera {
             state: Arc::new(Mutex::new(SharedState{
                 camera_settings: CaptureParams::new(),
                 setting_changed: false,
+                eta: None,
                 most_recent_capture: None,
                 frame_id: 0,
                 stop_request: false,
                 current_capture_settings: CaptureParams::new(),
             })),
-            notify: Arc::new(tokio::sync::Notify::new()),
             video_capture_thread: None,
         };
         cam.set_gain(cam.optimal_gain())?;
@@ -124,7 +124,6 @@ impl ASICamera {
     // executes this function.
     fn worker(min_gain: i32, max_gain: i32,
               state: Arc<Mutex<SharedState>>,
-              notify: Arc<tokio::sync::Notify>,
               asi_cam_sdk: Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
         let mut locked_sdk = asi_cam_sdk.lock().unwrap();
         let mut starting = true;
@@ -138,6 +137,7 @@ impl ASICamera {
         loop {
             let capture_width;
             let capture_height;
+            let exp_duration;
             // Do we need to change any camera settings? This is also where
             // the initial camera settings are processed.
             {
@@ -175,6 +175,7 @@ impl ASICamera {
                         Err(e) => warn!("Error setting exposure: {}", &e.to_string())
                     }
                 }
+                exp_duration = new_settings.exposure_duration;
                 let new_roi = &new_settings.roi;
                 let old_roi = &old_settings.roi;
                 if starting || new_roi.binning != old_roi.binning ||
@@ -242,6 +243,7 @@ impl ASICamera {
                     continue
                 }
             }
+            state.lock().unwrap().eta = Some(Instant::now() + exp_duration);
             if discard_image_count > 0 {
                 discard_image_count -= 1;
             } else {
@@ -266,7 +268,6 @@ impl ASICamera {
                         temperature: temp,
                     });
                     locked_state.frame_id += 1;
-                    notify.notify_waiters();
                 }
             }
         }  // loop.
@@ -431,16 +432,16 @@ impl AbstractCamera for ASICamera {
             let min_gain = self.min_gain;
             let max_gain = self.max_gain;
             let cloned_state = self.state.clone();
-            let cloned_notify = self.notify.clone();
             let cloned_sdk = self.asi_cam_sdk.clone();
             self.video_capture_thread = Some(tokio::task::spawn_blocking(move || {
                 ASICamera::worker(
-                    min_gain, max_gain, cloned_state, cloned_notify, cloned_sdk);
+                    min_gain, max_gain, cloned_state, cloned_sdk);
             }));
         }
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
         loop {
+            let mut sleep_duration = Duration::from_millis(1);
             {
                 let locked_state = self.state.lock().unwrap();
                 if locked_state.most_recent_capture.is_some() &&
@@ -451,8 +452,29 @@ impl AbstractCamera for ASICamera {
                     return Ok((locked_state.most_recent_capture.clone().unwrap(),
                                locked_state.frame_id));
                 }
+                if locked_state.eta.is_some() {
+                    let time_to_eta =
+                        locked_state.eta.unwrap().saturating_duration_since(Instant::now());
+                    if time_to_eta > sleep_duration {
+                        sleep_duration = time_to_eta;
+                    }
+                }
             }
-            self.notify.notified().await;
+            tokio::time::sleep(sleep_duration).await;
+        }
+    }
+
+    fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
+        let locked_state = self.state.lock().unwrap();
+        if locked_state.most_recent_capture.is_some() &&
+            (prev_frame_id.is_none() ||
+             prev_frame_id.unwrap() != locked_state.frame_id)
+        {
+            Some(Duration::ZERO)
+        } else if locked_state.eta.is_some() {
+            Some(locked_state.eta.unwrap().saturating_duration_since(Instant::now()))
+        } else {
+            None
         }
     }
 
