@@ -236,9 +236,10 @@ impl ASICamera {
             let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
             unsafe { image_data.set_len(num_pixels as usize) }
             match locked_sdk.get_video_data(image_data.as_mut_ptr(), num_pixels as i64,
-                                            /*wait_ms=*/1000) {
+                                            /*wait_ms=*/2000) {
                 Ok(()) => (),
                 Err(e) => {
+                    // TODO: re-initialize capture?
                     warn!("Error getting video data: {}", &e.to_string());
                     continue
                 }
