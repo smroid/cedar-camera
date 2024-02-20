@@ -62,13 +62,11 @@ impl ASICamera {
             Err(e) => return Err(failed_precondition_error(&e.to_string()))
         };
         // Find the camera's min/max gain values.
-        match asi_cam_sdk.open() {
-            Ok(()) => (),
-            Err(e) => return Err(failed_precondition_error(&e.to_string()))
+        if let Err(e) = asi_cam_sdk.open() {
+            return Err(failed_precondition_error(&e.to_string()));
         }
-        match asi_cam_sdk.init() {
-            Ok(()) => (),
-            Err(e) => return Err(failed_precondition_error(&e.to_string()))
+        if let Err(e) = asi_cam_sdk.init() {
+            return Err(failed_precondition_error(&e.to_string()));
         }
         let mut got_gain = false;
         let mut default_gain = 0;
@@ -146,33 +144,31 @@ impl ASICamera {
                 let old_settings = &locked_state.current_capture_settings;
                 if locked_state.stop_request {
                     info!("Stopping video capture");
-                    match locked_sdk.stop_video_capture() {
-                        Ok(()) => (),
-                        Err(e) =>
-                            warn!("Error stopping video capture: {}", &e.to_string())
+                    if let Err(e) = locked_sdk.stop_video_capture() {
+                        warn!("Error stopping video capture: {}", &e.to_string());
                     }
                     locked_state.stop_request = false;
                     return;  // Exit thread.
                 }
                 // Propagate changed settings, if any, into the camera.
                 if starting || new_settings.flip != old_settings.flip {
-                    match locked_sdk.set_control_value(
+                    if let Err(e) = locked_sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_FLIP,
                         Self::sdk_flip(new_settings.flip) as i64,
-                        /*auto=*/false) {
-                        Ok(()) => (),
-                        Err(e) => warn!("Error setting flip mode: {}", &e.to_string())
+                        /*auto=*/false)
+                    {
+                        warn!("Error setting flip mode: {}", &e.to_string());
                     }
                 }
                 if starting ||
                     new_settings.exposure_duration != old_settings.exposure_duration
                 {
-                    match locked_sdk.set_control_value(
+                    if let Err(e) = locked_sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_EXPOSURE,
                         new_settings.exposure_duration.as_micros() as i64,
-                        /*auto=*/false) {
-                        Ok(()) => (),
-                        Err(e) => warn!("Error setting exposure: {}", &e.to_string())
+                        /*auto=*/false)
+                    {
+                        warn!("Error setting exposure: {}", &e.to_string());
                     }
                 }
                 exp_duration = new_settings.exposure_duration;
@@ -181,50 +177,47 @@ impl ASICamera {
                 if starting || new_roi.binning != old_roi.binning ||
                     new_roi.capture_dimensions != old_roi.capture_dimensions
                 {
-                    match locked_sdk.set_roi_format(
+                    if let Err(e) = locked_sdk.set_roi_format(
                         new_roi.capture_dimensions.0, new_roi.capture_dimensions.1,
                         match new_roi.binning { BinFactor::X1 => 1, BinFactor::X2 => 2, },
-                        asi_camera2_sdk::ASI_IMG_TYPE_ASI_IMG_RAW8) {
-                        Ok(()) => (),
-                        Err(e) => warn!("Error setting ROI: {}", &e.to_string())
+                        asi_camera2_sdk::ASI_IMG_TYPE_ASI_IMG_RAW8)
+                    {
+                        warn!("Error setting ROI: {}", &e.to_string());
                     }
                 }
                 (capture_width, capture_height) = new_roi.capture_dimensions;
                 if starting || new_roi.capture_startpos != old_roi.capture_startpos {
-                    match locked_sdk.set_start_pos(
-                        new_roi.capture_startpos.0, new_roi.capture_startpos.1) {
-                        Ok(()) => (),
-                        Err(e) => warn!("Error setting ROI startpos: {}", &e.to_string())
+                    if let Err(e) = locked_sdk.set_start_pos(
+                        new_roi.capture_startpos.0, new_roi.capture_startpos.1)
+                    {
+                        warn!("Error setting ROI startpos: {}", &e.to_string());
                     }
                 }
                 if starting || new_settings.gain != old_settings.gain {
-                    match locked_sdk.set_control_value(
+                    if let Err(e) = locked_sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN,
                         Self::sdk_gain(new_settings.gain.value(),
                                        min_gain, max_gain),
-                        /*auto=*/false) {
-                        Ok(()) => (),
-                        Err(e) => warn!("Error setting gain: {}", &e.to_string())
+                        /*auto=*/false)
+                    {
+                        warn!("Error setting gain: {}", &e.to_string());
                     }
                 }
                 if starting || new_settings.offset != old_settings.offset {
-                    match locked_sdk.set_control_value(
+                    if let Err(e) = locked_sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_OFFSET,
                         new_settings.offset.value() as i64,
-                        /*auto=*/false) {
-                        Ok(()) => (),
-                        Err(e) => warn!("Error setting offset: {}", &e.to_string())
+                        /*auto=*/false)
+                    {
+                        warn!("Error setting offset: {}", &e.to_string());
                     }
                 }
                 // We're done processing the new settings, they're now current.
                 locked_state.current_capture_settings = locked_state.camera_settings;
                 if starting {
-                    match locked_sdk.start_video_capture() {
-                        Ok(()) => (),
-                        Err(e) => {
-                            error!("Error starting video capture: {}", &e.to_string());
-                            return;  // Abandon thread execution!
-                        }
+                    if let Err(e) = locked_sdk.start_video_capture() {
+                        error!("Error starting video capture: {}", &e.to_string());
+                        return;  // Abandon thread execution!
                     }
                     info!("Starting video capture");
                     starting = false;
@@ -235,14 +228,11 @@ impl ASICamera {
             let num_pixels = capture_width * capture_height;
             let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
             unsafe { image_data.set_len(num_pixels as usize) }
-            match locked_sdk.get_video_data(image_data.as_mut_ptr(), num_pixels as i64,
-                                            /*wait_ms=*/2000) {
-                Ok(()) => (),
-                Err(e) => {
-                    // TODO: re-initialize capture?
-                    warn!("Error getting video data: {}", &e.to_string());
-                    continue
-                }
+            if let Err(e) = locked_sdk.get_video_data(
+                image_data.as_mut_ptr(), num_pixels as i64, /*wait_ms=*/2000) {
+                // TODO: re-initialize capture?
+                warn!("Error getting video data: {}", &e.to_string());
+                continue;
             }
             state.lock().unwrap().eta = Some(Instant::now() + exp_duration);
             if discard_image_count > 0 {
@@ -256,9 +246,10 @@ impl ASICamera {
                     let temp = match locked_sdk.get_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_TEMPERATURE) {
                         Ok(x) => { Celsius((x.0 / 10) as i32) },
-                        Err(e) => { warn!("Error getting temperature: {}",
-                                          &e.to_string());
-                                    Celsius(0) }
+                        Err(e) => {
+                            warn!("Error getting temperature: {}", &e.to_string());
+                            Celsius(0)
+                        }
                     };
                     locked_state.most_recent_capture = Some(CapturedImage {
                         capture_params: locked_state.camera_settings,
