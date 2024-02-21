@@ -39,6 +39,9 @@ struct SharedState {
     camera_settings: CaptureParams,
     setting_changed: bool,
 
+    // Zero means go fast as camerea frames are available.
+    update_interval: Duration,
+
     // Estimated time at which `most_recent_capture` will next be updated.
     eta: Option<Instant>,
 
@@ -93,6 +96,7 @@ impl ASICamera {
             state: Arc::new(Mutex::new(SharedState{
                 camera_settings: CaptureParams::new(),
                 setting_changed: false,
+                update_interval: Duration::ZERO,
                 eta: None,
                 most_recent_capture: None,
                 frame_id: 0,
@@ -133,6 +137,8 @@ impl ASICamera {
         let pipeline_depth = 2;  // TODO: does this differ across ASI models?
         let mut discard_image_count = 0;
         loop {
+            // TODO: handle update_duration.
+
             let capture_width;
             let capture_height;
             let exp_duration;
@@ -346,31 +352,31 @@ impl AbstractCamera for ASICamera {
     }
 
     fn set_flip_mode(&mut self, flip_mode: Flip) -> Result<(), CanonicalError> {
-        let mut state = self.state.lock().unwrap();
-        state.camera_settings.flip = flip_mode;
-        ASICamera::changed_setting(&mut state);
+        let mut locked_state = self.state.lock().unwrap();
+        locked_state.camera_settings.flip = flip_mode;
+        ASICamera::changed_setting(&mut locked_state);
         Ok(())
     }
     fn get_flip_mode(&self) -> Flip {
-        let state = self.state.lock().unwrap();
-        state.camera_settings.flip
+        let locked_state = self.state.lock().unwrap();
+        locked_state.camera_settings.flip
     }
 
     fn set_exposure_duration(&mut self, exp_duration: Duration)
                              -> Result<(), CanonicalError> {
-        let mut state = self.state.lock().unwrap();
-        state.camera_settings.exposure_duration = exp_duration;
-        ASICamera::changed_setting(&mut state);
+        let mut locked_state = self.state.lock().unwrap();
+        locked_state.camera_settings.exposure_duration = exp_duration;
+        ASICamera::changed_setting(&mut locked_state);
         Ok(())
     }
     fn get_exposure_duration(&self) -> Duration {
-        let state = self.state.lock().unwrap();
-        state.camera_settings.exposure_duration
+        let locked_state = self.state.lock().unwrap();
+        locked_state.camera_settings.exposure_duration
     }
 
     fn set_region_of_interest(&mut self, mut roi: RegionOfInterest)
                               -> Result<RegionOfInterest, CanonicalError> {
-        let mut state = self.state.lock().unwrap();
+        let mut locked_state = self.state.lock().unwrap();
 
         // Validate/adjust capture dimensions.
         let (mut roi_width, mut roi_height) = roi.capture_dimensions;
@@ -380,35 +386,42 @@ impl AbstractCamera for ASICamera {
         // Additionally, ASI doc says that for ASI120 model, width*height%1024
         // must be 0. We punt on this for now.
         roi.capture_dimensions = (roi_width, roi_height);
-        state.camera_settings.roi = roi;
-        ASICamera::changed_setting(&mut state);
-        Ok(state.camera_settings.roi)
+        locked_state.camera_settings.roi = roi;
+        ASICamera::changed_setting(&mut locked_state);
+        Ok(locked_state.camera_settings.roi)
     }
     fn get_region_of_interest(&self) -> RegionOfInterest {
-        let state = self.state.lock().unwrap();
-        state.camera_settings.roi
+        let locked_state = self.state.lock().unwrap();
+        locked_state.camera_settings.roi
     }
 
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
-        let mut state = self.state.lock().unwrap();
-        state.camera_settings.gain = gain;
-        ASICamera::changed_setting(&mut state);
+        let mut locked_state = self.state.lock().unwrap();
+        locked_state.camera_settings.gain = gain;
+        ASICamera::changed_setting(&mut locked_state);
         Ok(())
     }
     fn get_gain(&self) -> Gain {
-        let state = self.state.lock().unwrap();
-        state.camera_settings.gain
+        let locked_state = self.state.lock().unwrap();
+        locked_state.camera_settings.gain
     }
 
     fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError> {
-        let mut state = self.state.lock().unwrap();
-        state.camera_settings.offset = offset;
-        ASICamera::changed_setting(&mut state);
+        let mut locked_state = self.state.lock().unwrap();
+        locked_state.camera_settings.offset = offset;
+        ASICamera::changed_setting(&mut locked_state);
         Ok(())
     }
     fn get_offset(&self) -> Offset {
-        let state = self.state.lock().unwrap();
-        state.camera_settings.offset
+        let locked_state = self.state.lock().unwrap();
+        locked_state.camera_settings.offset
+    }
+
+    fn set_update_interval(&mut self, update_interval: Duration)
+                           -> Result<(), CanonicalError> {
+        let mut locked_state = self.state.lock().unwrap();
+        locked_state.update_interval = update_interval;
+        Ok(())
     }
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)

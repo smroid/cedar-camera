@@ -172,6 +172,12 @@ pub trait AbstractCamera: {
     fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError>;
     fn get_offset(&self) -> Offset;
 
+    // Determines how often an image is captured for return in capture_image().
+    // An interval of zero means run continuously-- images are captured as soon
+    // as they become available in the camera.
+    fn set_update_interval(&mut self, update_interval: Duration)
+                           -> Result<(), CanonicalError>;
+
     // Action methods.
 
     /// Obtains a single image from this camera, as configured above. The

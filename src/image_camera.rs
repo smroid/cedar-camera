@@ -85,6 +85,11 @@ impl AbstractCamera for ImageCamera {
         Offset::new(0)
     }
 
+    fn set_update_interval(&mut self, _update_interval: Duration)
+                           -> Result<(), CanonicalError> {
+        Ok(())
+    }
+
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
         if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
