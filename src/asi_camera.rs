@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use image::GrayImage;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 use asi_camera2::asi_camera2_sdk;
 use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedImage,
@@ -127,6 +127,7 @@ impl ASICamera {
     fn worker(min_gain: i32, max_gain: i32,
               state: Arc<Mutex<SharedState>>,
               asi_cam_sdk: Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
+        debug!("Starting ASICamera worker");
         let mut locked_sdk = asi_cam_sdk.lock().unwrap();
         let mut starting = true;
         // Whenever we change the camera settings, we will have discarded the
@@ -136,9 +137,10 @@ impl ASICamera {
         // a setting change.
         let pipeline_depth = 2;  // TODO: does this differ across ASI models?
         let mut discard_image_count = 0;
+        // Keep track of when we grabbed a frame.
+        let mut last_frame_time: Option<Instant> = None;
         loop {
-            // TODO: handle update_duration.
-
+            let update_interval: Duration;
             let capture_width;
             let capture_height;
             let exp_duration;
@@ -146,10 +148,11 @@ impl ASICamera {
             // the initial camera settings are processed.
             {
                 let mut locked_state = state.lock().unwrap();
+                update_interval = locked_state.update_interval;
                 let new_settings = &locked_state.camera_settings;
                 let old_settings = &locked_state.current_capture_settings;
                 if locked_state.stop_request {
-                    info!("Stopping video capture");
+                    debug!("Stopping video capture");
                     if let Err(e) = locked_sdk.stop_video_capture() {
                         warn!("Error stopping video capture: {}", &e.to_string());
                     }
@@ -225,10 +228,26 @@ impl ASICamera {
                         error!("Error starting video capture: {}", &e.to_string());
                         return;  // Abandon thread execution!
                     }
-                    info!("Starting video capture");
+                    debug!("Starting video capture");
                     starting = false;
                 }
             }  // state.lock().
+
+            // Is it time to grab a frame?
+            let now = Instant::now();
+            if last_frame_time.is_some() {
+                let next_update_time = last_frame_time.unwrap() + update_interval;
+                if next_update_time > now {
+                    let delay = next_update_time - now;
+                    state.lock().unwrap().eta = Some(Instant::now() + delay);
+                    std::thread::sleep(delay);
+                    continue;
+                }
+                state.lock().unwrap().eta = None;
+            }
+
+            // Time to grab a frame.
+            last_frame_time = Some(now);
 
             // Allocate uninitialized storage to receive the image data.
             let num_pixels = capture_width * capture_height;
@@ -240,7 +259,9 @@ impl ASICamera {
                 warn!("Error getting video data: {}", &e.to_string());
                 continue;
             }
-            state.lock().unwrap().eta = Some(Instant::now() + exp_duration);
+            if update_interval == Duration::ZERO {
+                state.lock().unwrap().eta = Some(Instant::now() + exp_duration);
+            }
             if discard_image_count > 0 {
                 discard_image_count -= 1;
             } else {
