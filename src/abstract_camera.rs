@@ -93,7 +93,7 @@ pub struct CaptureParams {
 impl CaptureParams {
     pub fn new() -> CaptureParams {
         CaptureParams{flip: Flip::None,
-                      exposure_duration: Duration::from_millis(100),
+                      exposure_duration: Duration::from_millis(10),
                       roi: RegionOfInterest{binning: BinFactor::X1,
                                             capture_dimensions: (-1, -1),
                                             capture_startpos: (0, 0)},
