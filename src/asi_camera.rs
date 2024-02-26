@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use image::GrayImage;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 
 use asi_camera2::asi_camera2_sdk;
 use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedImage,
@@ -57,6 +57,17 @@ struct SharedState {
 }
 
 impl ASICamera {
+    fn open_and_init(asi_cam_sdk: &mut asi_camera2_sdk::ASICamera)
+                     -> Result<(), CanonicalError> {
+        if let Err(e) = asi_cam_sdk.open() {
+            return Err(failed_precondition_error(&e.to_string()));
+        }
+        if let Err(e) = asi_cam_sdk.init() {
+            return Err(failed_precondition_error(&e.to_string()));
+        }
+        Ok(())
+    }
+
     /// Returns an ASICamera instance that implements the AbstractCamera API.
     pub fn new(mut asi_cam_sdk: asi_camera2_sdk::ASICamera)
                -> Result<Self, CanonicalError> {
@@ -65,11 +76,17 @@ impl ASICamera {
             Err(e) => return Err(failed_precondition_error(&e.to_string()))
         };
         // Find the camera's min/max gain values.
-        if let Err(e) = asi_cam_sdk.open() {
-            return Err(failed_precondition_error(&e.to_string()));
-        }
-        if let Err(e) = asi_cam_sdk.init() {
-            return Err(failed_precondition_error(&e.to_string()));
+        loop {
+            if let Err(open_err) = Self::open_and_init(&mut asi_cam_sdk) {
+                warn!("Error opening asi_cam_sdk: {}", &open_err.to_string());
+                if let Err(close_err) = asi_cam_sdk.close() {
+                    warn!("Error closing asi_cam_sdk: {}", &close_err.to_string());
+                }
+                asi_camera2_sdk::reset_asi_cameras();
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            break;
         }
         let mut got_gain = false;
         let mut default_gain = 0;
@@ -130,6 +147,7 @@ impl ASICamera {
         debug!("Starting ASICamera worker");
         let mut locked_sdk = asi_cam_sdk.lock().unwrap();
         let mut starting = true;
+        let mut recover_camera = false;
         // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
         // started. Not only that, but ASI cameras seem to have some kind of
@@ -148,6 +166,19 @@ impl ASICamera {
             // the initial camera settings are processed.
             {
                 let mut locked_state = state.lock().unwrap();
+                if recover_camera {
+                    if let Err(close_err) = locked_sdk.close() {
+                        warn!("Error closing asi_cam_sdk: {}", &close_err.to_string());
+                    }
+                    asi_camera2_sdk::reset_asi_cameras();
+                    std::thread::sleep(Duration::from_secs(5));
+                    if let Err(open_err) = Self::open_and_init(&mut locked_sdk) {
+                        warn!("Error reopening asi_cam_sdk: {}", &open_err.to_string());
+                        continue;
+                    }
+                    recover_camera = false;
+                    starting = true;  // Re-init all camera params.
+                }
                 update_interval = locked_state.update_interval;
                 let new_settings = &locked_state.camera_settings;
                 let old_settings = &locked_state.current_capture_settings;
@@ -209,7 +240,9 @@ impl ASICamera {
                                        min_gain, max_gain),
                         /*auto=*/false)
                     {
-                        warn!("Error setting gain: {}", &e.to_string());
+                        warn!("Error setting gain to {:?}: {}",
+                              Self::sdk_gain(new_settings.gain.value(),
+                                             min_gain, max_gain), &e.to_string());
                     }
                 }
                 if starting || new_settings.offset != old_settings.offset {
@@ -218,15 +251,17 @@ impl ASICamera {
                         new_settings.offset.value() as i64,
                         /*auto=*/false)
                     {
-                        warn!("Error setting offset: {}", &e.to_string());
+                        warn!("Error setting offset to {:?}: {}",
+                              new_settings.offset, &e.to_string());
                     }
                 }
                 // We're done processing the new settings, they're now current.
                 locked_state.current_capture_settings = locked_state.camera_settings;
                 if starting {
                     if let Err(e) = locked_sdk.start_video_capture() {
-                        error!("Error starting video capture: {}", &e.to_string());
-                        return;  // Abandon thread execution!
+                        warn!("Error starting video capture: {:?}; resetting and retrying", e);
+                        recover_camera = true;
+                        continue;
                     }
                     debug!("Starting video capture");
                     starting = false;
@@ -255,8 +290,8 @@ impl ASICamera {
             unsafe { image_data.set_len(num_pixels as usize) }
             if let Err(e) = locked_sdk.get_video_data(
                 image_data.as_mut_ptr(), num_pixels as i64, /*wait_ms=*/2000) {
-                // TODO: re-initialize capture?
-                warn!("Error getting video data: {}", &e.to_string());
+                warn!("Error getting video data: {:?}; resetting and retrying", e);
+                recover_camera = true;
                 continue;
             }
             if update_interval == Duration::ZERO {
