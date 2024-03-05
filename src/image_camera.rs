@@ -14,6 +14,9 @@ pub struct ImageCamera {
     image: Arc<GrayImage>,
     exposure_duration: Duration,
 
+    offset: Offset,
+    gain: Gain,
+
     // Most recent completed capture and its id value.
     most_recent_capture: Option<CapturedImage>,
     frame_id: i32,
@@ -23,6 +26,8 @@ impl ImageCamera {
     pub fn new(image: GrayImage) -> Result<Self, CanonicalError> {
         Ok(ImageCamera{image: Arc::new(image),
                        exposure_duration: Duration::from_millis(100),
+                       offset: Offset::new(3),
+                       gain: Gain::new(50),
                        most_recent_capture: None,
                        frame_id: 0,})
     }
@@ -71,18 +76,20 @@ impl AbstractCamera for ImageCamera {
                          capture_dimensions: self.dimensions()}
     }
 
-    fn set_gain(&mut self, _gain: Gain) -> Result<(), CanonicalError> {
-        Err(unimplemented_error("set_gain not implemented"))
+    fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
+        self.gain = gain;
+        Ok(())
     }
     fn get_gain(&self) -> Gain {
-        self.optimal_gain()
+        self.gain
     }
 
-    fn set_offset(&mut self, _offset: Offset) -> Result<(), CanonicalError> {
-        Err(unimplemented_error("set_offset not implemented"))
+    fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError> {
+        self.offset = offset;
+        Ok(())
     }
     fn get_offset(&self) -> Offset {
-        Offset::new(0)
+        self.offset
     }
 
     fn set_update_interval(&mut self, _update_interval: Duration)
