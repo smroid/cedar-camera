@@ -5,8 +5,8 @@ use env_logger;
 use log::info;
 
 use asi_camera2::asi_camera2_sdk;
-use camera_service::abstract_camera::{AbstractCamera, Gain, Offset};
-use camera_service::asi_camera;
+use cedar_camera::abstract_camera::{AbstractCamera, Gain, Offset};
+use cedar_camera::asi_camera;
 
 /// Utility program for capturing an series of images from the camera over a
 /// range of gain values and exposure times.

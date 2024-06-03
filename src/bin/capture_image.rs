@@ -8,8 +8,8 @@ use env_logger;
 use log::info;
 
 use asi_camera2::asi_camera2_sdk;
-use camera_service::abstract_camera::{AbstractCamera, Gain, Offset};
-use camera_service::asi_camera;
+use cedar_camera::abstract_camera::{AbstractCamera, Gain, Offset};
+use cedar_camera::asi_camera;
 
 /// Example program for capturing an image from the camera and saving it to a
 /// file.
