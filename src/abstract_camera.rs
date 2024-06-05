@@ -65,6 +65,7 @@ pub enum BinFactor {
     #[default]
     X1,  // Unbinned.
     X2,  // Each output pixel is the combined value of 2x2 input pixels.
+    // TODO: X4 binning?
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
