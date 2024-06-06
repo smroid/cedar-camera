@@ -10,7 +10,8 @@ use log::{debug, info, warn};
 
 use asi_camera2::asi_camera2_sdk;
 use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedImage,
-                             Celsius, Flip, Gain, Offset, RegionOfInterest};
+                             Celsius, EnumeratedCameraInfo, Flip, Gain, Offset,
+                             RegionOfInterest};
 
 pub struct ASICamera {
     // The SDK wrapper object. After initialization, the video capture thread is
@@ -57,6 +58,20 @@ struct SharedState {
 }
 
 impl ASICamera {
+    pub fn enumerate_cameras() -> Vec<EnumeratedCameraInfo> {
+        let mut answer = vec![];
+        let num_cameras = asi_camera2_sdk::ASICamera::num_connected_asi_cameras();
+        for cam_index in 0..num_cameras {
+            let camera_info = asi_camera2_sdk::ASICamera::get_property(cam_index).unwrap();
+            let cstr = CStr::from_bytes_until_nul(&camera_info.Name).unwrap();
+            answer.push(EnumeratedCameraInfo{model: cstr.to_str().unwrap().to_owned(),
+                                             width: camera_info.MaxWidth as i32,
+                                             height: camera_info.MaxHeight as i32,
+                                             is_color: camera_info.IsColorCam != 0});
+        }
+        answer
+    }
+
     fn open_and_init(asi_cam_sdk: &mut asi_camera2_sdk::ASICamera)
                      -> Result<(), CanonicalError> {
         if let Err(e) = asi_cam_sdk.open() {
@@ -69,12 +84,14 @@ impl ASICamera {
     }
 
     /// Returns an ASICamera instance that implements the AbstractCamera API.
-    pub fn new(mut asi_cam_sdk: asi_camera2_sdk::ASICamera)
-               -> Result<Self, CanonicalError> {
-        let info = match asi_cam_sdk.get_property() {
+    /// `camera_index` is w.r.t. the enumerate_cameras() vector length.
+    pub fn new(camera_index: i32) -> Result<Self, CanonicalError> {
+        let info = match asi_camera2_sdk::ASICamera::get_property(camera_index) {
             Ok(prop) => prop,
             Err(e) => return Err(failed_precondition_error(&e.to_string()))
         };
+        let mut asi_cam_sdk = asi_camera2_sdk::ASICamera::new(info.CameraID);
+
         // Find the camera's min/max gain values.
         loop {
             if let Err(open_err) = Self::open_and_init(&mut asi_cam_sdk) {

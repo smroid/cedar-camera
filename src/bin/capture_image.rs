@@ -48,8 +48,7 @@ async fn main() {
     if num_cameras > 1 {
         println!("num_cameras: {}; using first camera", num_cameras);
     }
-    let mut asi_camera = asi_camera::ASICamera::new(
-        asi_camera2_sdk::ASICamera::new(0)).unwrap();
+    let mut asi_camera = asi_camera::ASICamera::new(0).unwrap();
     asi_camera.set_offset(Offset::new(args.offset)).unwrap();
     asi_camera.set_gain(Gain::new(args.gain)).unwrap();
 

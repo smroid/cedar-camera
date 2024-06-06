@@ -5,6 +5,23 @@ use async_trait::async_trait;
 use image::GrayImage;
 use canonical_error::CanonicalError;
 
+/// Each kind of camera interface (e.g. ASI (USB port), Raspberry Pi (CSI
+/// connector)) provides a function to enumerate the connected camera(s), if
+/// any, for that interface type.
+/// The enumeration function returns an instance of this struct for each
+/// detected camera.
+pub struct EnumeratedCameraInfo {
+    /// Identifies what kind of camera this is. e.g. "ASI120mm mini", "RPiCam2", etc.
+    pub model: String,
+
+    /// Number of pixels in the camera's sensor.
+    pub width: i32,
+    pub height: i32,
+
+    /// Whether the camera is color (true) or monochrome (false).
+    pub is_color: bool,
+}
+
 /// Abstract camera gain values range from 0 to 100, inclusive. Each camera type
 /// scales this gain value as needed, mapping 0 to its actual lowest gain and 100
 /// to its highest gain.
