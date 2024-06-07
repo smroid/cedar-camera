@@ -10,16 +10,14 @@ use canonical_error::CanonicalError;
 /// any, for that interface type.
 /// The enumeration function returns an instance of this struct for each
 /// detected camera.
+#[derive(Debug)]
 pub struct EnumeratedCameraInfo {
     /// Identifies what kind of camera this is. e.g. "ASI120mm mini", "RPiCam2", etc.
     pub model: String,
 
     /// Number of pixels in the camera's sensor.
-    pub width: i32,
-    pub height: i32,
-
-    /// Whether the camera is color (true) or monochrome (false).
-    pub is_color: bool,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Abstract camera gain values range from 0 to 100, inclusive. Each camera type

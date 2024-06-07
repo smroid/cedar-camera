@@ -25,6 +25,7 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 
+    // TODO: cmdline arg to choose ASI vs Rpi.
     let num_cameras = asi_camera2_sdk::ASICamera::num_connected_asi_cameras();
     if num_cameras == 0 {
         panic!("No camera??");

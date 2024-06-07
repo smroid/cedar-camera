@@ -65,9 +65,8 @@ impl ASICamera {
             let camera_info = asi_camera2_sdk::ASICamera::get_property(cam_index).unwrap();
             let cstr = CStr::from_bytes_until_nul(&camera_info.Name).unwrap();
             answer.push(EnumeratedCameraInfo{model: cstr.to_str().unwrap().to_owned(),
-                                             width: camera_info.MaxWidth as i32,
-                                             height: camera_info.MaxHeight as i32,
-                                             is_color: camera_info.IsColorCam != 0});
+                                             width: camera_info.MaxWidth as u32,
+                                             height: camera_info.MaxHeight as u32});
         }
         answer
     }
