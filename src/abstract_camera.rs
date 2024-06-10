@@ -160,6 +160,7 @@ pub trait AbstractCamera: {
 
     // Changeable parameters that influence subsequent image captures.
 
+    // TODO: drop flip mode
     /// Default is Flip::None.
     fn set_flip_mode(&mut self, flip_mode: Flip) -> Result<(), CanonicalError>;
     fn get_flip_mode(&self) -> Flip;
@@ -171,6 +172,7 @@ pub trait AbstractCamera: {
     /// Returns the exposure duration to be used for the next exposure.
     fn get_exposure_duration(&self) -> Duration;
 
+    // TODO: drop ROI
     /// Default is unbinned, whole image. When setting region of interest,
     /// the implementation should adjust capture_startpos and/or capture_dimensions
     /// as needed to satisfy constraints of this camera type (e.g. capture width
