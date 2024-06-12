@@ -18,9 +18,8 @@ use libcamera::{
     stream::StreamRole,
 };
 
-use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedImage,
-                             Celsius, EnumeratedCameraInfo, Flip, Gain, Offset,
-                             RegionOfInterest};
+use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
+                             Celsius, EnumeratedCameraInfo, Gain, Offset};
 
 pub struct RpiCamera {
     model: String,
@@ -478,14 +477,6 @@ impl AbstractCamera for RpiCamera {
         }
     }
 
-    fn set_flip_mode(&mut self, _flip_mode: Flip) -> Result<(), CanonicalError> {
-        Err(unimplemented_error(
-            format!("Flip mode not supported for {}", self.model().unwrap()).as_str()))
-    }
-    fn get_flip_mode(&self) -> Flip {
-        Flip::None
-    }
-
     fn set_exposure_duration(&mut self, exp_duration: Duration)
                              -> Result<(), CanonicalError> {
         let mut locked_state = self.state.lock().unwrap();
@@ -496,19 +487,6 @@ impl AbstractCamera for RpiCamera {
     fn get_exposure_duration(&self) -> Duration {
         let locked_state = self.state.lock().unwrap();
         locked_state.camera_settings.exposure_duration
-    }
-
-    fn set_region_of_interest(&mut self, _roi: RegionOfInterest)
-                              -> Result<RegionOfInterest, CanonicalError> {
-        Err(unimplemented_error(
-            format!("Region of interest not supported for {}", self.model().unwrap()).as_str()))
-    }
-    fn get_region_of_interest(&self) -> RegionOfInterest {
-        let locked_state = self.state.lock().unwrap();
-        RegionOfInterest{binning: BinFactor::X1,
-                         capture_startpos: (0, 0),
-                         capture_dimensions: (locked_state.width as i32,
-                                              locked_state.height as i32)}
     }
 
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {

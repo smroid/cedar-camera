@@ -9,9 +9,8 @@ use image::GrayImage;
 use log::{debug, info, warn};
 
 use asi_camera2::asi_camera2_sdk;
-use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedImage,
-                             Celsius, EnumeratedCameraInfo, Flip, Gain, Offset,
-                             RegionOfInterest};
+use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
+                             Celsius, EnumeratedCameraInfo, Gain, Offset};
 
 pub struct ASICamera {
     // The SDK wrapper object. After initialization, the video capture thread is
@@ -139,9 +138,6 @@ impl ASICamera {
             video_capture_thread: None,
         };
         cam.set_gain(cam.optimal_gain())?;
-        let mut roi = cam.get_region_of_interest();
-        roi.capture_dimensions = cam.dimensions();
-        cam.set_region_of_interest(roi)?;
         info!("Created ASICamera API object");
         Ok(cam)
     }  // new().
@@ -158,6 +154,7 @@ impl ASICamera {
     // The first call to capture_image() starts the video capture thread that
     // executes this function.
     fn worker(min_gain: i32, max_gain: i32,
+              width: usize, height: usize,
               state: Arc<Mutex<SharedState>>,
               asi_cam_sdk: Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
         debug!("Starting ASICamera worker");
@@ -175,8 +172,6 @@ impl ASICamera {
         let mut last_frame_time: Option<Instant> = None;
         loop {
             let update_interval: Duration;
-            let capture_width;
-            let capture_height;
             let exp_duration;
             // Do we need to change any camera settings? This is also where
             // the initial camera settings are processed.
@@ -207,15 +202,6 @@ impl ASICamera {
                     return;  // Exit thread.
                 }
                 // Propagate changed settings, if any, into the camera.
-                if starting || new_settings.flip != old_settings.flip {
-                    if let Err(e) = locked_sdk.set_control_value(
-                        asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_FLIP,
-                        Self::sdk_flip(new_settings.flip) as i64,
-                        /*auto=*/false)
-                    {
-                        warn!("Error setting flip mode: {}", &e.to_string());
-                    }
-                }
                 if starting ||
                     new_settings.exposure_duration != old_settings.exposure_duration
                 {
@@ -228,27 +214,6 @@ impl ASICamera {
                     }
                 }
                 exp_duration = new_settings.exposure_duration;
-                let new_roi = &new_settings.roi;
-                let old_roi = &old_settings.roi;
-                if starting || new_roi.binning != old_roi.binning ||
-                    new_roi.capture_dimensions != old_roi.capture_dimensions
-                {
-                    if let Err(e) = locked_sdk.set_roi_format(
-                        new_roi.capture_dimensions.0, new_roi.capture_dimensions.1,
-                        match new_roi.binning { BinFactor::X1 => 1, BinFactor::X2 => 2, },
-                        asi_camera2_sdk::ASI_IMG_TYPE_ASI_IMG_RAW8)
-                    {
-                        warn!("Error setting ROI: {}", &e.to_string());
-                    }
-                }
-                (capture_width, capture_height) = new_roi.capture_dimensions;
-                if starting || new_roi.capture_startpos != old_roi.capture_startpos {
-                    if let Err(e) = locked_sdk.set_start_pos(
-                        new_roi.capture_startpos.0, new_roi.capture_startpos.1)
-                    {
-                        warn!("Error setting ROI startpos: {}", &e.to_string());
-                    }
-                }
                 if starting || new_settings.gain != old_settings.gain {
                     if let Err(e) = locked_sdk.set_control_value(
                         asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_GAIN,
@@ -301,7 +266,7 @@ impl ASICamera {
             last_frame_time = Some(now);
 
             // Allocate uninitialized storage to receive the image data.
-            let num_pixels = capture_width * capture_height;
+            let num_pixels:usize = width * height;
             let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
             unsafe { image_data.set_len(num_pixels as usize) }
             if let Err(e) = locked_sdk.get_video_data(
@@ -332,7 +297,7 @@ impl ASICamera {
                     locked_state.most_recent_capture = Some(CapturedImage {
                         capture_params: locked_state.camera_settings,
                         image: Arc::new(GrayImage::from_raw(
-                            capture_width as u32, capture_height as u32,
+                            width as u32, height as u32,
                             image_data).unwrap()),
                         readout_time: SystemTime::now(),
                         temperature: temp,
@@ -342,16 +307,6 @@ impl ASICamera {
             }
         }  // loop.
     }  // worker().
-
-    // Translate our Flip to the camera SDK's flip enum value.
-    fn sdk_flip(abstract_flip: Flip) -> u32 {
-        match abstract_flip {
-            Flip::None => asi_camera2_sdk::ASI_FLIP_STATUS_ASI_FLIP_NONE,
-            Flip::Horizontal => asi_camera2_sdk::ASI_FLIP_STATUS_ASI_FLIP_HORIZ,
-            Flip::Vertical => asi_camera2_sdk::ASI_FLIP_STATUS_ASI_FLIP_VERT,
-            Flip::Both => asi_camera2_sdk::ASI_FLIP_STATUS_ASI_FLIP_BOTH,
-        }
-    }
 
     // Translate our 0..100 into the camera SDK's min/max range.
     fn sdk_gain(abstract_gain: i32, sdk_min_gain: i32, sdk_max_gain: i32)
@@ -423,17 +378,6 @@ impl AbstractCamera for ASICamera {
         // Gain::new((100.0 * frac) as i32)
     }
 
-    fn set_flip_mode(&mut self, flip_mode: Flip) -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
-        locked_state.camera_settings.flip = flip_mode;
-        ASICamera::changed_setting(&mut locked_state);
-        Ok(())
-    }
-    fn get_flip_mode(&self) -> Flip {
-        let locked_state = self.state.lock().unwrap();
-        locked_state.camera_settings.flip
-    }
-
     fn set_exposure_duration(&mut self, exp_duration: Duration)
                              -> Result<(), CanonicalError> {
         let mut locked_state = self.state.lock().unwrap();
@@ -444,27 +388,6 @@ impl AbstractCamera for ASICamera {
     fn get_exposure_duration(&self) -> Duration {
         let locked_state = self.state.lock().unwrap();
         locked_state.camera_settings.exposure_duration
-    }
-
-    fn set_region_of_interest(&mut self, mut roi: RegionOfInterest)
-                              -> Result<RegionOfInterest, CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
-
-        // Validate/adjust capture dimensions.
-        let (mut roi_width, mut roi_height) = roi.capture_dimensions;
-        // ASI doc says width%8 must be 0, and height%2 must be 0.
-        roi_width -= roi_width % 8;
-        roi_height -= roi_height % 2;
-        // Additionally, ASI doc says that for ASI120 model, width*height%1024
-        // must be 0. We punt on this for now.
-        roi.capture_dimensions = (roi_width, roi_height);
-        locked_state.camera_settings.roi = roi;
-        ASICamera::changed_setting(&mut locked_state);
-        Ok(locked_state.camera_settings.roi)
-    }
-    fn get_region_of_interest(&self) -> RegionOfInterest {
-        let locked_state = self.state.lock().unwrap();
-        locked_state.camera_settings.roi
     }
 
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
@@ -508,11 +431,12 @@ impl AbstractCamera for ASICamera {
         if self.video_capture_thread.is_none() {
             let min_gain = self.min_gain;
             let max_gain = self.max_gain;
+            let width = self.info.MaxWidth as usize;
+            let height = self.info.MaxHeight as usize;
             let cloned_state = self.state.clone();
             let cloned_sdk = self.asi_cam_sdk.clone();
             self.video_capture_thread = Some(tokio::task::spawn_blocking(move || {
-                ASICamera::worker(
-                    min_gain, max_gain, cloned_state, cloned_sdk);
+                ASICamera::worker(min_gain, max_gain, width, height, cloned_state, cloned_sdk);
             }));
         }
         // Get the most recently posted image; wait if there is none yet or the

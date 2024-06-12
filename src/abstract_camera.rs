@@ -61,58 +61,15 @@ impl Offset {
 pub struct Celsius(pub i32);
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub enum Flip {
-    #[default]
-    None,
-    Horizontal,
-    Vertical,
-    Both
-}
-
-/// Some cameras provide in-hardware binning. We require all cameras
-/// to support unbinned and 2x binned operation; if a camera does
-/// not natively provide binning capability, the AbstractCamera
-/// implementation must perform software binning.
-/// Note that binning is either by summing or averaging; it is up
-/// to application logic to react and set exposure accordingly.
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub enum BinFactor {
-    #[default]
-    X1,  // Unbinned.
-    X2,  // Each output pixel is the combined value of 2x2 input pixels.
-    // TODO: X4 binning?
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub struct RegionOfInterest {
-    pub binning: BinFactor,
-
-    // The capture position and dimensions are w.r.t. the dimensions
-    // of the sensor after binning.
-
-    /// (x, y) from top left.
-    pub capture_startpos: (i32, i32),
-
-    /// (width, height).
-    pub capture_dimensions: (i32, i32),
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct CaptureParams {
-    pub flip: Flip,
     pub exposure_duration: Duration,
-    pub roi: RegionOfInterest,
     pub gain: Gain,
     pub offset: Offset,
 }
 
 impl CaptureParams {
     pub fn new() -> CaptureParams {
-        CaptureParams{flip: Flip::None,
-                      exposure_duration: Duration::from_millis(10),
-                      roi: RegionOfInterest{binning: BinFactor::X1,
-                                            capture_dimensions: (-1, -1),
-                                            capture_startpos: (0, 0)},
+        CaptureParams{exposure_duration: Duration::from_millis(10),
                       gain: Gain::new(0),
                       offset: Offset::new(0),
         }
@@ -142,7 +99,7 @@ pub trait AbstractCamera: {
     // Unchanging attributes.
 
     /// Returns a string identifying what kind of camera this is. e.g.
-    /// "ASI120mm mini", "RPiCam2", etc.
+    /// "ASI120mm mini", "imx477", etc.
     fn model(&self) -> Result<String, CanonicalError>;
 
     /// Returns the (width, height) non-binned pixel count of this camera type's
@@ -160,27 +117,12 @@ pub trait AbstractCamera: {
 
     // Changeable parameters that influence subsequent image captures.
 
-    // TODO: drop flip mode
-    /// Default is Flip::None.
-    fn set_flip_mode(&mut self, flip_mode: Flip) -> Result<(), CanonicalError>;
-    fn get_flip_mode(&self) -> Flip;
-
     /// Returns InvalidArgument if specified exposure duration cannot be
     /// implemented by this camera type. Default is 100ms.
     fn set_exposure_duration(&mut self, exp_duration: Duration)
                              -> Result<(), CanonicalError>;
     /// Returns the exposure duration to be used for the next exposure.
     fn get_exposure_duration(&self) -> Duration;
-
-    // TODO: drop ROI
-    /// Default is unbinned, whole image. When setting region of interest,
-    /// the implementation should adjust capture_startpos and/or capture_dimensions
-    /// as needed to satisfy constraints of this camera type (e.g. capture width
-    /// might need to be a multiple of 16). The adjusted region of interest is
-    /// returned.
-    fn set_region_of_interest(&mut self, roi: RegionOfInterest)
-                              -> Result<RegionOfInterest, CanonicalError>;
-    fn get_region_of_interest(&self) -> RegionOfInterest;
 
     /// Default is the optimal_gain() value.
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError>;
@@ -230,7 +172,3 @@ pub trait AbstractCamera: {
     /// Many implementations will treat stop() as a no-op.
     async fn stop(&mut self);
 }
-
-// TODO: Mechanism to discover attached cameras and enumerate their properties.
-// Extensible for new camera types. Factory function to create an AbstractCamera
-// for a given camera index.

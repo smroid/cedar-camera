@@ -4,11 +4,11 @@ use std::time::{Duration, SystemTime};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use canonical_error::{CanonicalError, unimplemented_error};
+use canonical_error::{CanonicalError};
 use image::GrayImage;
 
-use crate::abstract_camera::{AbstractCamera, BinFactor, CaptureParams, CapturedImage,
-                             Celsius, Flip, Gain, Offset, RegionOfInterest};
+use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
+                             Celsius, Gain, Offset};
 
 pub struct ImageCamera {
     image: Arc<GrayImage>,
@@ -51,29 +51,12 @@ impl AbstractCamera for ImageCamera {
         Gain::new(50)
     }
 
-    fn set_flip_mode(&mut self, _flip_mode: Flip) -> Result<(), CanonicalError> {
-        Err(unimplemented_error("set_flip_mode not implemented"))
-    }
-    fn get_flip_mode(&self) -> Flip {
-        Flip::None
-    }
-
     fn set_exposure_duration(&mut self, _exp_duration: Duration)
                              -> Result<(), CanonicalError> {
         Ok(())  // Quietly ignore.
     }
     fn get_exposure_duration(&self) -> Duration {
         self.exposure_duration
-    }
-
-    fn set_region_of_interest(&mut self, _roi: RegionOfInterest)
-                              -> Result<RegionOfInterest, CanonicalError> {
-        Err(unimplemented_error("set_region_of_interest not implemented"))
-    }
-    fn get_region_of_interest(&self) -> RegionOfInterest {
-        RegionOfInterest{binning: BinFactor::X1,
-                         capture_startpos: (0, 0),
-                         capture_dimensions: self.dimensions()}
     }
 
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
@@ -107,9 +90,7 @@ impl AbstractCamera for ImageCamera {
         if self.most_recent_capture.is_none() {
             self.most_recent_capture = Some(CapturedImage {
                 capture_params: CaptureParams {
-                    flip: Flip::None,
                     exposure_duration: self.get_exposure_duration(),
-                    roi: self.get_region_of_interest(),
                     gain: self.get_gain(),
                     offset: self.get_offset(),
                 },
