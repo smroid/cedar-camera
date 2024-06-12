@@ -2,7 +2,7 @@ use canonical_error::{CanonicalError, failed_precondition_error, unimplemented_e
 
 use async_trait::async_trait;
 use image::GrayImage;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -14,7 +14,7 @@ use libcamera::{
     framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
     framebuffer_map::MemoryMappedFrameBuffer,
     properties,
-    request::ReuseFlag,
+    request::{ReuseFlag},
     stream::StreamRole,
 };
 
@@ -29,14 +29,14 @@ pub struct RpiCamera {
     sensor_width: f32,
     sensor_height: f32,
 
-    // Our state, shared between RpiCamera methods and the video capture thread.
+    // Our state, shared between RpiCamera methods and the capture thread.
     state: Arc<Mutex<SharedState>>,
 
-    // Our video capture thread. Executes worker().
-    video_capture_thread: Option<tokio::task::JoinHandle<()>>,
+    // Our capture thread. Executes worker().
+    capture_thread: Option<tokio::task::JoinHandle<()>>,
 }
 
-// State shared between video capture thread and the RpiCamera methods.
+// State shared between capture thread and the RpiCamera methods.
 struct SharedState {
     // Different models have different max analog gain. Min analog gain is always 1.
     max_gain: i32,
@@ -50,7 +50,7 @@ struct SharedState {
 
     is_packed: bool,
 
-    // is_color: bool,  // TODO: drop this?
+    is_color: bool,
     first_pixel_green: bool,
     // Amount by which we scale red/blue pixel sites to roughly equalize with green.
     // Scale factor is scale_rb_num/2.
@@ -72,11 +72,8 @@ struct SharedState {
     most_recent_capture: Option<CapturedImage>,
     frame_id: i32,
 
-    // Set by stop(); the video capture thread exits when it sees this.
+    // Set by stop(); the capture thread exits when it sees this.
     stop_request: bool,
-
-    // Camera settings in effect when the in-progress capture started.
-    current_capture_settings: CaptureParams,  // TODO: drop this
 }
 
 impl RpiCamera {
@@ -126,39 +123,43 @@ impl RpiCamera {
         let is_12_bit = pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
         let is_10_bit = pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
         let is_packed = pixel_format.ends_with("_CSI2P");
-        // let is_color = pixel_format.starts_with("S");
+        let is_color = pixel_format.starts_with("S");
         let first_pixel_green = pixel_format.starts_with("SG");
 
         // For HQ, Empirically it seems that blue and red pixels generally have
         // half intensity of green pixels for white stimulus.
-        // Use 4/2 or 3/2 scaling to bring red/blue roughly to parity with green.
+        // Use 4/2 (HQ) or 3/2 (others) scaling to bring red/blue roughly to
+        // parity with green.
         let scale_rb_num = if model.as_str() == "imx477" { 4 } else { 3 };
 
-        // TODO: revise for other camera types.
-        let max_gain = if model.as_str() == "imx477" { 22 } else { 63 };
+        // Annoyingly, different Rpi cameras have different max analog gain values.
+        let max_gain = match model.as_str() {
+            "imx477" => 22,
+            "imx296" => 15,
+            _ => 63,
+        };
+        debug!("max_gain {}", max_gain);
 
-        Ok(RpiCamera{model: model.to_string(),
-                     sensor_width: width as f32 * pixel_size_nanometers.width as f32 / 1000000.0,
-                     sensor_height: height as f32 * pixel_size_nanometers.height as f32 / 1000000.0,
-                     state: Arc::new(Mutex::new(SharedState{
-                         max_gain,
-                         width, height,
-                         is_10_bit, is_12_bit,
-                         is_packed,
-                         // is_color,
-                         first_pixel_green,
-                         scale_rb_num,
-                         camera_settings: CaptureParams::new(),
-                         setting_changed: false,
-                         update_interval: Duration::ZERO,
-                         eta: None,
-                         most_recent_capture: None,
-                         frame_id: 0,
-                         stop_request: false,
-                         current_capture_settings: CaptureParams::new(),
-                     })),
-                     video_capture_thread: None,
-        })
+        let mut cam = RpiCamera{model: model.to_string(),
+                                sensor_width: width as f32 * pixel_size_nanometers.width as f32 / 1000000.0,
+                                sensor_height: height as f32 * pixel_size_nanometers.height as f32 / 1000000.0,
+                                state: Arc::new(Mutex::new(SharedState{
+                                    max_gain,
+                                    width, height,
+                                    is_10_bit, is_12_bit, is_packed,
+                                    is_color, first_pixel_green, scale_rb_num,
+                                    camera_settings: CaptureParams::new(),
+                                    setting_changed: false,
+                                    update_interval: Duration::ZERO,
+                                    eta: None,
+                                    most_recent_capture: None,
+                                    frame_id: 0,
+                                    stop_request: false,
+                                })),
+                                capture_thread: None,
+        };
+        cam.set_gain(cam.optimal_gain())?;
+        Ok(cam)
     }
 
     // This function is called whenever a camera setting is changed. The most
@@ -179,11 +180,28 @@ impl RpiCamera {
         controls.set(AnalogueGain(Self::cam_gain(abstract_gain, state.max_gain))).unwrap();
     }
 
+    // Convert 10 or 12 bit pixels to 8 bits, by keeping the upper 8 bits.
+    //
+    // About raw color images: Because CedarDetect works with monochrome data,
+    // if the captured image is raw color (Bayer) we need to convert to
+    // grayscale. We do so not by debayering (interpolating color into each
+    // output pixel) but instead we IGNORE the bayer nature of the pixel grid
+    // and just pass the pixel values through (not quite true, we do a crude
+    // equalization of R/B and G pixels; see below).
+    // This has the following benefits:
+    // * It is fast.
+    // * It allows CedarDetect's hot pixel detection to work effectively.
+    // * Star images are only weakly colored anyway.
+    // * CedarDetect usually does 2x2 binning prior to running its star detection
+    //   algorithm, so the R/G/B values are roughly converted to luma in the
+    //   binning process.
+    // TODO: constructor arg to control RB/G equalization.
     fn convert_to_8bit(stride: usize,
                        buf_data: &[u8],
                        image_data: &mut Vec<u8>,
                        state: &MutexGuard<SharedState>) {
         let scale_rb_numerator = state.scale_rb_num;
+        let equalize_rb_g = state.is_color;
         if state.is_10_bit {
             if state.is_packed {
                 // Convert from packed 10 bit to 8 bit.
@@ -198,17 +216,20 @@ impl RpiCamera {
                         in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
                             image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
                     {
-                        // Discard 2 lsb.
+                        // Keep upper 8 bits; discard 2 lsb.
                         let mut pix0 = buf_chunk[0];
                         let mut pix1 = buf_chunk[1];
                         let mut pix2 = buf_chunk[2];
                         let mut pix3 = buf_chunk[3];
-                        if green_phase {
-                            pix1 = if pix1 > 170 { 255 } else { ((scale_rb_numerator * pix1 as u16) / 2) as u8 };
-                            pix3 = if pix3 > 170 { 255 } else { ((scale_rb_numerator * pix3 as u16) / 2) as u8 };
-                        } else {
-                            pix0 = if pix0 > 170 { 255 } else { ((scale_rb_numerator * pix0 as u16) / 2) as u8 };
-                            pix2 = if pix2 > 170 { 255 } else { ((scale_rb_numerator * pix2 as u16) / 2) as u8 };
+                        // pix4 has the lsb values, which we discard.
+                        if equalize_rb_g {
+                            if green_phase {
+                                pix1 = if pix1 > 170 { 255 } else { ((scale_rb_numerator * pix1 as u16) / 2) as u8 };
+                                pix3 = if pix3 > 170 { 255 } else { ((scale_rb_numerator * pix3 as u16) / 2) as u8 };
+                            } else {
+                                pix0 = if pix0 > 170 { 255 } else { ((scale_rb_numerator * pix0 as u16) / 2) as u8 };
+                                pix2 = if pix2 > 170 { 255 } else { ((scale_rb_numerator * pix2 as u16) / 2) as u8 };
+                            }
                         }
                         pix_chunk[0] = pix0;
                         pix_chunk[1] = pix1;
@@ -217,7 +238,7 @@ impl RpiCamera {
                     }
                 }
             } else {
-                // TODO: deal with unpacked.
+                panic!("Unpacked raw not yet supported");
             }
         } else if state.is_12_bit {
             if state.is_packed {
@@ -233,27 +254,30 @@ impl RpiCamera {
                         in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
                             image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
                     {
-                        // Discard 4 lsb.
+                        // Keep upper 8 bits; discard 4 lsb.
                         let mut pix0 = buf_chunk[0];
                         let mut pix1 = buf_chunk[1];
-                        if green_phase {
-                            pix1 = if pix1 > 127 { 255 } else { ((scale_rb_numerator * pix1 as u16) / 2) as u8 };
-                        } else {
-                            pix0 = if pix0 > 127 { 255 } else { ((scale_rb_numerator * pix0 as u16) / 2) as u8 };
+                        // pix2 has the lsb values, which we discard.
+                        if equalize_rb_g {
+                            if green_phase {
+                                pix1 = if pix1 > 127 { 255 } else { ((scale_rb_numerator * pix1 as u16) / 2) as u8 };
+                            } else {
+                                pix0 = if pix0 > 127 { 255 } else { ((scale_rb_numerator * pix0 as u16) / 2) as u8 };
+                            }
                         }
                         pix_pair[0] = pix0;
                         pix_pair[1] = pix1;
                     }
                 }
             } else {
-                // TODO: deal with unpacked.
+                panic!("Unpacked raw not yet supported");
             }
         } else {
-            // TODO: 8 bits.
+            panic!("8 bit raw not yet supported");
         }
     }
 
-    // The first call to capture_image() starts the video capture thread that
+    // The first call to capture_image() starts the capture thread that
     // executes this function.
     fn worker(state: Arc<Mutex<SharedState>>) {
         info!("Starting RpiCamera worker");
@@ -261,7 +285,7 @@ impl RpiCamera {
         // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
         // started. We need to discard a few images after a setting change.
-        let pipeline_depth = 5;
+        let pipeline_depth = 4;  // TODO: why isn't this just two?
         let mut discard_image_count = 0;
 
         let mgr = CameraManager::new().unwrap();
@@ -272,8 +296,7 @@ impl RpiCamera {
         let mut cfgs = cam.generate_configuration(&[StreamRole::Raw]).unwrap();
         match cfgs.validate() {
             CameraConfigurationStatus::Invalid => {
-                error!("Camera configuration was rejected: {:#?}", cfgs);
-                return;  // Abandon thread execution!
+                panic!("Camera configuration was rejected: {:#?}", cfgs);
             },
             _ => ()
         }
@@ -299,7 +322,7 @@ impl RpiCamera {
             .collect::<Vec<_>>();
 
         {
-            let mut locked_state = state.lock().unwrap();
+            let locked_state = state.lock().unwrap();
             // Create capture requests and attach buffers.
             let reqs = buffers
                 .into_iter()
@@ -317,9 +340,9 @@ impl RpiCamera {
             for req in reqs {
                 active_cam.queue_request(req).unwrap();
             }
-            locked_state.current_capture_settings = locked_state.camera_settings;
+            // locked_state.current_capture_settings = locked_state.camera_settings;
             info!("Starting capturing");
-        }  // locked_state
+        }
 
         // Keep track of when we grabbed a frame.
         let mut last_frame_time: Option<Instant> = None;
@@ -330,7 +353,7 @@ impl RpiCamera {
                 let mut locked_state = state.lock().unwrap();
                 update_interval = locked_state.update_interval;
                 if locked_state.stop_request {
-                    info!("Stopping video capture");
+                    info!("Stopping capture");
                     if let Err(e) = active_cam.stop() {
                         warn!("Error stopping capture: {}", &e.to_string());
                     }
@@ -357,8 +380,6 @@ impl RpiCamera {
             {
                 let mut locked_state = state.lock().unwrap();
                 if locked_state.setting_changed {
-                    // active_cam.stop().unwrap();
-                    // active_cam.start(None).unwrap();
                     discard_image_count = pipeline_depth;
                     locked_state.setting_changed = false;
                     req.reuse(ReuseFlag::REUSE_BUFFERS);
@@ -370,8 +391,8 @@ impl RpiCamera {
                 if discard_image_count > 0 {
                     discard_image_count -= 1;
                     req.reuse(ReuseFlag::REUSE_BUFFERS);
-                    // let controls = req.controls_mut();
-                    // Self::setup_camera_request(controls, &locked_state);
+                    let controls = req.controls_mut();
+                    Self::setup_camera_request(controls, &locked_state);
                     active_cam.queue_request(req).unwrap();
                     continue;
                 }
@@ -397,6 +418,8 @@ impl RpiCamera {
 
                 // Re-queue the request.
                 req.reuse(ReuseFlag::REUSE_BUFFERS);
+                let controls = req.controls_mut();
+                Self::setup_camera_request(controls, &locked_state);
                 active_cam.queue_request(req).unwrap();
 
                 if update_interval == Duration::ZERO {
@@ -416,7 +439,6 @@ impl RpiCamera {
 
     // Translate our 0..100 into the camera min/max range for analog gain.
     fn cam_gain(abstract_gain: i32, cam_max_gain: i32) -> f32 {
-        // Translate our 0..100 into the camera's min/max range.
         let frac = abstract_gain as f64 / 100.0;
         (1.0 + (cam_max_gain as f64 - 1.0) * frac) as f32
     }
@@ -448,12 +470,11 @@ impl AbstractCamera for RpiCamera {
     fn optimal_gain(&self) -> Gain {
         // For Rpi cameras, we use the maximum analog gain as the optimum gain value.
         // We don't use digital gain.
-        if self.model.as_str() == "imx477" {
+        match self.model.as_str() {
             // See: https://www.strollswithmydog.com/pi-hq-cam-sensor-performance/
-            Gain::new(20)  // Corresponds to analog gain 4.
-        } else {
-            // TODO: revise this, use a per-model optimal gain value.
-            Gain::new(50)
+            "imx477" => Gain::new(20),  // Corresponds to analog gain 4.
+            "imx296" => Gain::new(20),  // TODO: figure this out.
+            _ => Gain::new(20),
         }
     }
 
@@ -519,15 +540,15 @@ impl AbstractCamera for RpiCamera {
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
         // Has the worker terminated for some reason?
-        if self.video_capture_thread.is_some() &&
-            self.video_capture_thread.as_ref().unwrap().is_finished()
+        if self.capture_thread.is_some() &&
+            self.capture_thread.as_ref().unwrap().is_finished()
         {
-            self.video_capture_thread.take().unwrap().await.unwrap();
+            self.capture_thread.take().unwrap().await.unwrap();
         }
-        // Start video capture thread if terminated or not yet started.
-        if self.video_capture_thread.is_none() {
+        // Start capture thread if terminated or not yet started.
+        if self.capture_thread.is_none() {
             let cloned_state = self.state.clone();
-            self.video_capture_thread = Some(tokio::task::spawn_blocking(move || {
+            self.capture_thread = Some(tokio::task::spawn_blocking(move || {
                 RpiCamera::worker(cloned_state);
             }));
         }
@@ -572,9 +593,9 @@ impl AbstractCamera for RpiCamera {
     }
 
     async fn stop(&mut self) {
-        if self.video_capture_thread.is_some() {
+        if self.capture_thread.is_some() {
             self.state.lock().unwrap().stop_request = true;
-            self.video_capture_thread.take().unwrap().await.unwrap();
+            self.capture_thread.take().unwrap().await.unwrap();
         }
     }
 }
