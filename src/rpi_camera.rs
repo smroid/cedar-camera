@@ -51,9 +51,6 @@ struct SharedState {
 
     is_color: bool,
     first_pixel_green: bool,
-    // Amount by which we scale red/blue pixel sites to roughly equalize with green.
-    // Scale factor is scale_rb_num/2.
-    scale_rb_num: u16,
 
     // Current camera settings as set via RpiCamera methods. Will be put into
     // effect when the current exposure finishes, influencing the following
@@ -125,12 +122,6 @@ impl RpiCamera {
         let is_color = pixel_format.starts_with("S");
         let first_pixel_green = pixel_format.starts_with("SG");
 
-        // For HQ, Empirically it seems that blue and red pixels generally have
-        // half intensity of green pixels for white stimulus.
-        // Use 4/2 (HQ) or 3/2 (others) scaling to bring red/blue roughly to
-        // parity with green.
-        let scale_rb_num = if model.as_str() == "imx477" { 4 } else { 3 };
-
         // Annoyingly, different Rpi cameras have different max analog gain values.
         let max_gain = match model.as_str() {
             "imx477" => 22,
@@ -146,7 +137,7 @@ impl RpiCamera {
                                     max_gain,
                                     width, height,
                                     is_10_bit, is_12_bit, is_packed,
-                                    is_color, first_pixel_green, scale_rb_num,
+                                    is_color, first_pixel_green,
                                     camera_settings: CaptureParams::new(),
                                     setting_changed: false,
                                     update_interval: Duration::ZERO,
@@ -185,8 +176,7 @@ impl RpiCamera {
     // if the captured image is raw color (Bayer) we need to convert to
     // grayscale. We do so not by debayering (interpolating color into each
     // output pixel) but instead we IGNORE the bayer nature of the pixel grid
-    // and just pass the pixel values through (not quite true, we do a crude
-    // equalization of R/B and G pixels; see below).
+    // and just pass the pixel values through.
     // This has the following benefits:
     // * It is fast.
     // * It allows CedarDetect's hot pixel detection to work effectively.
@@ -194,13 +184,10 @@ impl RpiCamera {
     // * CedarDetect usually does 2x2 binning prior to running its star detection
     //   algorithm, so the R/G/B values are roughly converted to luma in the
     //   binning process.
-    // TODO: constructor arg to control RB/G equalization.
     fn convert_to_8bit(stride: usize,
                        buf_data: &[u8],
                        image_data: &mut Vec<u8>,
                        state: &MutexGuard<SharedState>) {
-        let scale_rb_numerator = state.scale_rb_num;
-        let equalize_rb_g = state.is_color;
         if state.is_10_bit {
             if state.is_packed {
                 // Convert from packed 10 bit to 8 bit.
@@ -221,15 +208,6 @@ impl RpiCamera {
                         let mut pix2 = buf_chunk[2];
                         let mut pix3 = buf_chunk[3];
                         // pix4 has the lsb values, which we discard.
-                        if equalize_rb_g {
-                            if green_phase {
-                                pix1 = if pix1 > 170 { 255 } else { ((scale_rb_numerator * pix1 as u16) / 2) as u8 };
-                                pix3 = if pix3 > 170 { 255 } else { ((scale_rb_numerator * pix3 as u16) / 2) as u8 };
-                            } else {
-                                pix0 = if pix0 > 170 { 255 } else { ((scale_rb_numerator * pix0 as u16) / 2) as u8 };
-                                pix2 = if pix2 > 170 { 255 } else { ((scale_rb_numerator * pix2 as u16) / 2) as u8 };
-                            }
-                        }
                         pix_chunk[0] = pix0;
                         pix_chunk[1] = pix1;
                         pix_chunk[2] = pix2;
@@ -257,13 +235,6 @@ impl RpiCamera {
                         let mut pix0 = buf_chunk[0];
                         let mut pix1 = buf_chunk[1];
                         // pix2 has the lsb values, which we discard.
-                        if equalize_rb_g {
-                            if green_phase {
-                                pix1 = if pix1 > 127 { 255 } else { ((scale_rb_numerator * pix1 as u16) / 2) as u8 };
-                            } else {
-                                pix0 = if pix0 > 127 { 255 } else { ((scale_rb_numerator * pix0 as u16) / 2) as u8 };
-                            }
-                        }
                         pix_pair[0] = pix0;
                         pix_pair[1] = pix1;
                     }
@@ -284,7 +255,7 @@ impl RpiCamera {
         // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
         // started. We need to discard a few images after a setting change.
-        let pipeline_depth = 4;  // TODO: why isn't this just two?
+        let pipeline_depth = 5;  // TODO: why isn't this just two?
         let mut discard_image_count = 0;
 
         let mgr = CameraManager::new().unwrap();
