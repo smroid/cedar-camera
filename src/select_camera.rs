@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::abstract_camera::AbstractCamera;
 use crate::asi_camera::ASICamera;
 use crate::rpi_camera::RpiCamera;
@@ -20,7 +22,7 @@ pub enum CameraInterface {
 // * `camera_index` controls which camera (on the selected interface) is
 //   returned.
 pub fn select_camera(camera_interface: Option<CameraInterface>,
-                     camera_index: i32) -> Result<Box<dyn AbstractCamera>, CanonicalError> {
+                     camera_index: i32) -> Result<Arc<dyn AbstractCamera>, CanonicalError> {
     // Enumerate cameras on supported interfaces.
     let asi_cameras = ASICamera::enumerate_cameras();
     let rpi_cameras = RpiCamera::enumerate_cameras();
@@ -34,7 +36,7 @@ pub fn select_camera(camera_interface: Option<CameraInterface>,
                     format!("Only ASI camera found but {:?} was requested", ci).as_str()));
             }
         }
-        return Ok(Box::new(ASICamera::new(camera_index)?));
+        return Ok(Arc::new(ASICamera::new(camera_index).unwrap()));
     }
     if rpi_cameras.len() > 0 && asi_cameras.len() == 0 {
         if let Some(ci) = camera_interface {
@@ -43,7 +45,7 @@ pub fn select_camera(camera_interface: Option<CameraInterface>,
                     format!("Only Rpi camera found but {:?} was requested", ci).as_str()));
             }
         }
-        return Ok(Box::new(RpiCamera::new(camera_index)?));
+        return Ok(Arc::new(RpiCamera::new(camera_index).unwrap()));
     }
     // Both camera interfaces are present.
     match camera_interface {
@@ -52,10 +54,10 @@ pub fn select_camera(camera_interface: Option<CameraInterface>,
                 "Both ASI and Rpi cameras found but no 'camera_interface' selector was passed"))
         },
         Some(CameraInterface::ASI) => {
-            Ok(Box::new(ASICamera::new(camera_index)?))
+            Ok(Arc::new(ASICamera::new(camera_index).unwrap()))
         },
         Some(CameraInterface::Rpi) => {
-            Ok(Box::new(RpiCamera::new(camera_index)?))
+            Ok(Arc::new(RpiCamera::new(camera_index).unwrap()))
         },
     }
 }

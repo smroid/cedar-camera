@@ -9,7 +9,7 @@ edition = "2021"
 canonical-error = "0.1.0"
 log = "0.4.19"
 env_logger = "0.10.0"
-image = "0.24.6"
+image = "0.25.1"
 chrono = "0.4.0"
 asi_camera2 = { version = "0.2.0", path = "../asi_camera2" }
 cedar_detect = { version = "0.5.0", path = "../cedar-detect" }
