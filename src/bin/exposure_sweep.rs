@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -27,8 +26,7 @@ async fn main() {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-    let mut binding = select_camera(None, 0).unwrap();
-    let camera = Arc::get_mut(&mut binding).unwrap();
+    let mut camera = select_camera(None, 0).unwrap();
     let (width, height) = camera.dimensions();
     // Central region.
     let roi = Rect::at(width / 2, height / 2).of_size(30, 30);

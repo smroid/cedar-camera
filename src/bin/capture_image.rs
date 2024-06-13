@@ -1,7 +1,6 @@
 use chrono::offset::Local;
 use chrono::DateTime;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -40,8 +39,7 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
-    let mut binding = select_camera(None, 0).unwrap();
-    let camera = Arc::get_mut(&mut binding).unwrap();
+    let mut camera = select_camera(None, 0).unwrap();
 
     // Ignore cameras that can't set offset.
     let _ = camera.set_offset(Offset::new(args.offset));
