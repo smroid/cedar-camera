@@ -48,8 +48,6 @@ struct SharedState {
     is_12_bit: bool,
 
     is_packed: bool,
-
-    is_color: bool,
     first_pixel_green: bool,
 
     // Current camera settings as set via RpiCamera methods. Will be put into
@@ -119,7 +117,6 @@ impl RpiCamera {
         let is_12_bit = pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
         let is_10_bit = pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
         let is_packed = pixel_format.ends_with("_CSI2P");
-        let is_color = pixel_format.starts_with("S");
         let first_pixel_green = pixel_format.starts_with("SG");
 
         // Annoyingly, different Rpi cameras have different max analog gain values.
@@ -137,7 +134,7 @@ impl RpiCamera {
                                     max_gain,
                                     width, height,
                                     is_10_bit, is_12_bit, is_packed,
-                                    is_color, first_pixel_green,
+                                    first_pixel_green,
                                     camera_settings: CaptureParams::new(),
                                     setting_changed: false,
                                     update_interval: Duration::ZERO,
@@ -192,8 +189,8 @@ impl RpiCamera {
             if state.is_packed {
                 // Convert from packed 10 bit to 8 bit.
                 for row in 0..state.height {
-                    let green_phase =
-                        if state.first_pixel_green { (row & 1) == 0 } else { (row & 1) != 0 };
+                    // let green_phase =
+                    //     if state.first_pixel_green { (row & 1) == 0 } else { (row & 1) != 0 };
                     let buf_row_start = (row * stride) as usize;
                     let buf_row_end = buf_row_start + (state.width*5/4) as usize;
                     let pix_row_start = (row * state.width) as usize;
@@ -203,10 +200,10 @@ impl RpiCamera {
                             image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
                     {
                         // Keep upper 8 bits; discard 2 lsb.
-                        let mut pix0 = buf_chunk[0];
-                        let mut pix1 = buf_chunk[1];
-                        let mut pix2 = buf_chunk[2];
-                        let mut pix3 = buf_chunk[3];
+                        let pix0 = buf_chunk[0];
+                        let pix1 = buf_chunk[1];
+                        let pix2 = buf_chunk[2];
+                        let pix3 = buf_chunk[3];
                         // pix4 has the lsb values, which we discard.
                         pix_chunk[0] = pix0;
                         pix_chunk[1] = pix1;
@@ -221,8 +218,8 @@ impl RpiCamera {
             if state.is_packed {
                 // Convert from packed 12 bit to 8 bit.
                 for row in 0..state.height {
-                    let green_phase =
-                        if state.first_pixel_green { (row & 1) == 0 } else { (row & 1) != 0 };
+                    // let green_phase =
+                    //     if state.first_pixel_green { (row & 1) == 0 } else { (row & 1) != 0 };
                     let buf_row_start = (row * stride) as usize;
                     let buf_row_end = buf_row_start + (state.width*3/2) as usize;
                     let pix_row_start = (row * state.width) as usize;
@@ -232,8 +229,8 @@ impl RpiCamera {
                             image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
                     {
                         // Keep upper 8 bits; discard 4 lsb.
-                        let mut pix0 = buf_chunk[0];
-                        let mut pix1 = buf_chunk[1];
+                        let pix0 = buf_chunk[0];
+                        let pix1 = buf_chunk[1];
                         // pix2 has the lsb values, which we discard.
                         pix_pair[0] = pix0;
                         pix_pair[1] = pix1;
