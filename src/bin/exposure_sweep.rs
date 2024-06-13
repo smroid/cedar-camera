@@ -3,9 +3,12 @@ use std::time::Duration;
 use clap::Parser;
 use env_logger;
 use log::info;
+use imageproc::rect::Rect;
 
 use cedar_camera::abstract_camera::Gain;
 use cedar_camera::select_camera::select_camera;
+use cedar_detect::algorithm::{estimate_background_from_image_region,
+                              estimate_noise_from_image_region};
 
 /// Utility program for capturing an series of images from the camera over a
 /// range of gain values and exposure times.
@@ -24,6 +27,9 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let mut camera = select_camera(None, 0).unwrap();
+    let (width, height) = camera.dimensions();
+    // Central region.
+    let roi = Rect::at(width / 2, height / 2).of_size(30, 30);
 
     let mut frame_id = -1;
     for gain in [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100] {
@@ -31,13 +37,16 @@ async fn main() {
         for exp_ms in [10, 20, 50, 100] {
             camera.set_exposure_duration(Duration::from_micros(
                 exp_ms as u64 * 1000)).unwrap();
-            info!("gain {}, exp time {}ms", gain, exp_ms);
             let (captured_image, new_frame_id) =
                 camera.capture_image(Some(frame_id)).await.unwrap();
             frame_id = new_frame_id;
 
             // Move captured_image's image data into a GrayImage.
             let image = &captured_image.image;
+            let background = estimate_background_from_image_region(image, &roi);
+            let noise = estimate_noise_from_image_region(image, &roi);
+            info!("gain {}, exp time {}ms; background/noise {}/{}",
+                  gain, exp_ms, background, noise);
 
             // Modify the filename to incorporate the gain and exposure time. The .bmp
             // extension is automatically appended (it should not be provided on the
