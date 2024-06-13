@@ -95,7 +95,7 @@ pub struct CapturedImage {
 /// Note that we do not provide a 'gamma' setting; all AbstractCamera implementations
 /// should configure the camera for linear mapping.
 #[async_trait]
-pub trait AbstractCamera: {
+pub trait AbstractCamera {
     // Unchanging attributes.
 
     /// Returns a string identifying what kind of camera this is. e.g.
