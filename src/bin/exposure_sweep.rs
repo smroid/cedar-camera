@@ -4,9 +4,8 @@ use clap::Parser;
 use env_logger;
 use log::info;
 
-use asi_camera2::asi_camera2_sdk;
-use cedar_camera::abstract_camera::{AbstractCamera, Gain, Offset};
-use cedar_camera::asi_camera;
+use cedar_camera::abstract_camera::Gain;
+use cedar_camera::select_camera::select_camera;
 
 /// Utility program for capturing an series of images from the camera over a
 /// range of gain values and exposure times.
@@ -24,27 +23,17 @@ async fn main() {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-
-    // TODO: cmdline arg to choose ASI vs Rpi.
-    let num_cameras = asi_camera2_sdk::ASICamera::num_connected_asi_cameras();
-    if num_cameras == 0 {
-        panic!("No camera??");
-    }
-    if num_cameras > 1 {
-        println!("num_cameras: {}; using first camera", num_cameras);
-    }
-    let mut asi_camera = asi_camera::ASICamera::new(0).unwrap();
-    asi_camera.set_offset(Offset::new(3)).unwrap();
+    let mut camera = select_camera(None, 0).unwrap();
 
     let mut frame_id = -1;
     for gain in [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100] {
-        asi_camera.set_gain(Gain::new(gain)).unwrap();
+        camera.set_gain(Gain::new(gain)).unwrap();
         for exp_ms in [10, 20, 50, 100] {
-            info!("gain {}, exp time {}ms", gain, exp_ms);
-            asi_camera.set_exposure_duration(Duration::from_micros(
+            camera.set_exposure_duration(Duration::from_micros(
                 exp_ms as u64 * 1000)).unwrap();
+            info!("gain {}, exp time {}ms", gain, exp_ms);
             let (captured_image, new_frame_id) =
-                asi_camera.capture_image(Some(frame_id)).await.unwrap();
+                camera.capture_image(Some(frame_id)).await.unwrap();
             frame_id = new_frame_id;
 
             // Move captured_image's image data into a GrayImage.

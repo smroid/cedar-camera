@@ -7,9 +7,8 @@ use clap::Parser;
 use env_logger;
 use log::info;
 
-use asi_camera2::asi_camera2_sdk;
-use cedar_camera::abstract_camera::{AbstractCamera, Gain, Offset};
-use cedar_camera::asi_camera;
+use cedar_camera::abstract_camera::{Gain, Offset};
+use cedar_camera::select_camera::select_camera;
 
 /// Example program for capturing an image from the camera and saving it to a
 /// file.
@@ -40,23 +39,19 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
+    let mut camera = select_camera(None, 0).unwrap();
 
-    // TODO: cmdline arg to choose ASI vs Rpi.
-    let num_cameras = asi_camera2_sdk::ASICamera::num_connected_asi_cameras();
-    if num_cameras == 0 {
-        panic!("No camera??");
-    }
-    if num_cameras > 1 {
-        println!("num_cameras: {}; using first camera", num_cameras);
-    }
-    let mut asi_camera = asi_camera::ASICamera::new(0).unwrap();
-    asi_camera.set_offset(Offset::new(args.offset)).unwrap();
-    asi_camera.set_gain(Gain::new(args.gain)).unwrap();
+    // Ignore cameras that can't set offset.
+    let _ = camera.set_offset(Offset::new(args.offset));
+
+    camera.set_gain(Gain::new(args.gain)).unwrap();
 
     let exposure_time_millisec = args.exposure_time;
-    asi_camera.set_exposure_duration(Duration::from_micros(
+    camera.set_exposure_duration(Duration::from_micros(
         exposure_time_millisec as u64 * 1000)).unwrap();
-    let (captured_image, _frame_id) = asi_camera.capture_image(None).await.unwrap();
+    println!("capture_image");
+    let (captured_image, _frame_id) = camera.capture_image(None).await.unwrap();
+    println!("finished capture_image");
 
     // Move captured_image's image data into a GrayImage.
     let image = &captured_image.image;
