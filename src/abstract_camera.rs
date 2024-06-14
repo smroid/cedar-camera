@@ -100,7 +100,7 @@ pub trait AbstractCamera {
 
     /// Returns a string identifying what kind of camera this is. e.g.
     /// "ASI120mm mini", "imx477", etc.
-    fn model(&self) -> Result<String, CanonicalError>;
+    fn model(&self) -> String;
 
     /// Returns the (width, height) non-binned pixel count of this camera type's
     /// sensor.
@@ -132,9 +132,9 @@ pub trait AbstractCamera {
     fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError>;
     fn get_offset(&self) -> Offset;
 
-    /// Determines whether a 2x2 subsampled image is returned by `capture_image`.
-    /// If the camera produces Bayer color, the green pixels are sampled and the
-    /// red/blue pixels discarded.
+    /// Determines whether a 2x2 subsampled image is returned by
+    /// `capture_image`. If the camera produces Bayer color, half of the green
+    /// pixels are sampled and all of the red/blue pixels discarded.
     /// Note that `dimensions` is unaffected.
     /// Default is false.
     fn set_sampled(&mut self, sampled: bool) -> Result<(), CanonicalError>;

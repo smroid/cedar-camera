@@ -340,9 +340,9 @@ impl Drop for ASICamera {
 
 #[async_trait]
 impl AbstractCamera for ASICamera {
-    fn model(&self) -> Result<String, CanonicalError> {
+    fn model(&self) -> String {
         let cstr = CStr::from_bytes_until_nul(&self.info.Name).unwrap();
-        Ok(cstr.to_str().unwrap().to_owned())
+        cstr.to_str().unwrap().to_owned()
     }
 
     fn dimensions(&self) -> (i32, i32) {
@@ -359,7 +359,7 @@ impl AbstractCamera for ASICamera {
     fn optimal_gain(&self) -> Gain {
         let optimal_gain;  // In SDK units.
         // Use the optimal gain value for each ASI camera model.
-        match self.model().unwrap().as_str() {
+        match self.model().as_str() {
             "ZWO ASI120MM Mini" => {
                 // Per graphs at
                 // https://astronomy-imaging-camera.com/product/asi120mm-mini-mono

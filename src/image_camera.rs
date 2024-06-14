@@ -40,8 +40,8 @@ impl ImageCamera {
 
 #[async_trait]
 impl AbstractCamera for ImageCamera {
-    fn model(&self) -> Result<String, CanonicalError> {
-        Ok("ImageCamera".to_string())
+    fn model(&self) -> String {
+        "ImageCamera".to_string()
     }
 
     fn dimensions(&self) -> (i32, i32) {

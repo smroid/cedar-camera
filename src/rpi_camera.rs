@@ -483,8 +483,8 @@ impl Drop for RpiCamera {
 
 #[async_trait]
 impl AbstractCamera for RpiCamera {
-    fn model(&self) -> Result<String, CanonicalError> {
-        Ok(self.model.clone())
+    fn model(&self) -> String {
+        self.model.clone()
     }
 
     fn dimensions(&self) -> (i32, i32) {
@@ -532,7 +532,7 @@ impl AbstractCamera for RpiCamera {
 
     fn set_offset(&mut self, _offset: Offset) -> Result<(), CanonicalError> {
         Err(unimplemented_error(
-            format!("Offset not supported for {}", self.model().unwrap()).as_str()))
+            format!("Offset not supported for {}", self.model()).as_str()))
     }
     fn get_offset(&self) -> Offset {
         Offset::new(0)
