@@ -5,7 +5,7 @@ use env_logger;
 use log::info;
 use imageproc::rect::Rect;
 
-use cedar_camera::abstract_camera::Gain;
+use cedar_camera::abstract_camera::{Gain, Offset};
 use cedar_camera::select_camera::select_camera;
 use cedar_detect::algorithm::{estimate_background_from_image_region,
                               estimate_noise_from_image_region};
@@ -27,6 +27,9 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let mut camera = select_camera(None, 0).unwrap();
+    // Ignore cameras that can't set offset.
+    let _ = camera.set_offset(Offset::new(3));
+
     let (width, height) = camera.dimensions();
     // Central region.
     let roi = Rect::at(width / 2, height / 2).of_size(30, 30);
