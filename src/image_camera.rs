@@ -1,11 +1,14 @@
 // Fake camera that yields a fixed image. For testing.
 
 use std::time::{Duration, SystemTime};
+use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use canonical_error::{CanonicalError};
 use image::GrayImage;
+use image::imageops;
+use image::imageops::FilterType;
 
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
                              Celsius, Gain, Offset};
@@ -16,6 +19,7 @@ pub struct ImageCamera {
 
     offset: Offset,
     gain: Gain,
+    sampled: bool,
 
     // Most recent completed capture and its id value.
     most_recent_capture: Option<CapturedImage>,
@@ -28,6 +32,7 @@ impl ImageCamera {
                        exposure_duration: Duration::from_millis(100),
                        offset: Offset::new(3),
                        gain: Gain::new(50),
+                       sampled: false,
                        most_recent_capture: None,
                        frame_id: 0,})
     }
@@ -75,6 +80,18 @@ impl AbstractCamera for ImageCamera {
         self.offset
     }
 
+    fn set_sampled(&mut self, sampled: bool) -> Result<(), CanonicalError> {
+        if self.sampled != sampled {
+            // Force returned image to be re-computed.
+            self.most_recent_capture = None;
+        }
+        self.sampled = sampled;
+        Ok(())
+    }
+    fn get_sampled(&self) -> bool {
+        self.sampled
+    }
+
     fn set_update_interval(&mut self, _update_interval: Duration)
                            -> Result<(), CanonicalError> {
         Ok(())
@@ -88,13 +105,19 @@ impl AbstractCamera for ImageCamera {
             self.most_recent_capture = None;
         }
         if self.most_recent_capture.is_none() {
+            let mut image = self.image.deref().clone();
+            if self.sampled {
+                let (width, height) = self.dimensions();
+                image = imageops::resize(&image, (width / 2) as u32, (height / 2) as u32,
+                                         FilterType::Nearest);
+            }
             self.most_recent_capture = Some(CapturedImage {
                 capture_params: CaptureParams {
                     exposure_duration: self.get_exposure_duration(),
                     gain: self.get_gain(),
                     offset: self.get_offset(),
                 },
-                image: self.image.clone(),
+                image: Arc::new(image),
                 readout_time: SystemTime::now(),
                 temperature: Celsius(20),
             });

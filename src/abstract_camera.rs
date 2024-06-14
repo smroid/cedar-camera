@@ -132,6 +132,14 @@ pub trait AbstractCamera {
     fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError>;
     fn get_offset(&self) -> Offset;
 
+    /// Determines whether a 2x2 subsampled image is returned by `capture_image`.
+    /// If the camera produces Bayer color, the green pixels are sampled and the
+    /// red/blue pixels discarded.
+    /// Note that `dimensions` is unaffected.
+    /// Default is false.
+    fn set_sampled(&mut self, sampled: bool) -> Result<(), CanonicalError>;
+    fn get_sampled(&self) -> bool;
+
     // Determines how often an image is captured for return in capture_image().
     // An interval of zero means run continuously-- images are captured as soon
     // as they become available in the camera.
