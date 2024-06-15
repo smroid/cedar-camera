@@ -7,8 +7,7 @@ use imageproc::rect::Rect;
 
 use cedar_camera::abstract_camera::{Gain, Offset};
 use cedar_camera::select_camera::select_camera;
-use cedar_detect::algorithm::{estimate_background_from_image_region,
-                              estimate_noise_from_image_region};
+use cedar_detect::algorithm::{estimate_background_from_image_region};
 
 /// Utility program for capturing an series of images from the camera over a
 /// range of gain values and exposure times.
@@ -46,8 +45,7 @@ async fn main() {
 
             // Move captured_image's image data into a GrayImage.
             let image = &captured_image.image;
-            let background = estimate_background_from_image_region(image, &roi);
-            let noise = estimate_noise_from_image_region(image, &roi);
+            let (background, noise) = estimate_background_from_image_region(image, &roi);
             info!("gain {}, exp time {}ms; background/noise {}/{}",
                   gain, exp_ms, background, noise);
 
