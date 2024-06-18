@@ -7,11 +7,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use canonical_error::{CanonicalError};
 use image::GrayImage;
-use image::imageops;
-use image::imageops::FilterType;
 
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
-                             Celsius, Gain, Offset};
+                             Celsius, Gain, Offset, sample_2x2};
 
 pub struct ImageCamera {
     image: Arc<GrayImage>,
@@ -111,9 +109,7 @@ impl AbstractCamera for ImageCamera {
         if self.most_recent_capture.is_none() {
             let mut image = self.image.deref().clone();
             if self.sampled {
-                let (width, height) = self.dimensions();
-                image = imageops::resize(&image, (width / 2) as u32, (height / 2) as u32,
-                                         FilterType::Nearest);
+                image = sample_2x2(image);
             }
             self.most_recent_capture = Some(CapturedImage {
                 capture_params: CaptureParams {

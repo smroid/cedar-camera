@@ -3,6 +3,9 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use image::GrayImage;
+use fast_image_resize::images::Image;
+use fast_image_resize::{FilterType, Resizer, ResizeOptions,
+                        ResizeAlg::Convolution, ResizeAlg};
 use canonical_error::CanonicalError;
 
 /// Each kind of camera interface (e.g. ASI (USB port), Raspberry Pi (CSI
@@ -183,4 +186,33 @@ pub trait AbstractCamera {
     /// longer than usual.
     /// Many implementations will treat stop() as a no-op.
     async fn stop(&mut self);
+}
+
+// Utility functions.
+pub fn bin_2x2(image: GrayImage) -> GrayImage {
+    resize_2x2(image, Convolution(FilterType::Box))
+}
+
+pub fn sample_2x2(image: GrayImage) -> GrayImage {
+    resize_2x2(image, ResizeAlg::Nearest)
+}
+
+fn resize_2x2(image: GrayImage, alg: ResizeAlg) -> GrayImage {
+    let (width, height) = image.dimensions();
+    let resized_width = width / 2;
+    let resized_height = height / 2;
+
+    // Convert GrayImage to Image for fast_image_resize.
+    let src_image = Image::from_vec_u8(width, height, image.into_raw(),
+                                       fast_image_resize::PixelType::U8).unwrap();
+    let mut dst_image = Image::new(resized_width, resized_height,
+                                   src_image.pixel_type());
+    // Resize the image into the dst_image buffer.
+    let mut resizer = Resizer::new();
+    resizer.resize(
+        &src_image, &mut dst_image,
+        &ResizeOptions::new().resize_alg(alg)).unwrap();
+
+    GrayImage::from_raw(resized_width, resized_height,
+                        dst_image.into_vec()).unwrap()
 }

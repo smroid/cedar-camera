@@ -6,13 +6,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use image::GrayImage;
-use image::imageops;
-use image::imageops::FilterType;
 use log::{debug, info, warn};
 
 use asi_camera2::asi_camera2_sdk;
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
-                             Celsius, EnumeratedCameraInfo, Gain, Offset};
+                             Celsius, EnumeratedCameraInfo, Gain, Offset, sample_2x2};
 
 pub struct ASICamera {
     // The SDK wrapper object. After initialization, the video capture thread is
@@ -301,8 +299,7 @@ impl ASICamera {
                     let mut image = GrayImage::from_raw(width as u32, height as u32,
                                                         image_data).unwrap();
                     if locked_state.sampled {
-                        image = imageops::resize(&image, (width / 2) as u32, (height / 2) as u32,
-                                                 FilterType::Nearest);
+                        image = sample_2x2(image);
                     }
                     locked_state.most_recent_capture = Some(CapturedImage {
                         capture_params: locked_state.camera_settings,
