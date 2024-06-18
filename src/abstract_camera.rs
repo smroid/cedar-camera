@@ -103,8 +103,11 @@ pub trait AbstractCamera {
     fn model(&self) -> String;
 
     /// Returns the (width, height) non-binned pixel count of this camera type's
-    /// sensor.
+    /// sensor. Does not change, even when set_sampled() is called.
     fn dimensions(&self) -> (i32, i32);
+
+    /// Tells if this camera is color (true) or monochrome (false).
+    fn is_color(&self) -> bool;
 
     /// Returns the (width, height) dimensions, in mm, of this camera type's
     /// sensor.
@@ -135,7 +138,8 @@ pub trait AbstractCamera {
     /// Determines whether a 2x2 subsampled image is returned by
     /// `capture_image`. If the camera produces Bayer color, half of the green
     /// pixels are sampled and all of the red/blue pixels discarded.
-    /// Note that `dimensions` is unaffected.
+    /// Note that `dimensions` is unaffected, but the returned image will
+    /// have width/height that are both half of the `dimensions` values.
     /// Default is false.
     fn set_sampled(&mut self, sampled: bool) -> Result<(), CanonicalError>;
     fn get_sampled(&self) -> bool;

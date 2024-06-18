@@ -349,6 +349,10 @@ impl AbstractCamera for ASICamera {
         (self.info.MaxWidth as i32, self.info.MaxHeight as i32)
     }
 
+    fn is_color(&self) -> bool {
+        self.info.IsColorCam != 0
+    }
+
     fn sensor_size(&self) -> (f32, f32) {
         let (width, height) = self.dimensions();
         let pixel_size_microns = self.info.PixelSize as f64;

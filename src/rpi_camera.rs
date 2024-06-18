@@ -48,6 +48,7 @@ struct SharedState {
     is_12_bit: bool,
 
     is_packed: bool,
+    is_color: bool,
     first_pixel_green: bool,
 
     // Current camera settings as set via RpiCamera methods. Will be put into
@@ -118,6 +119,7 @@ impl RpiCamera {
         let is_12_bit = pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
         let is_10_bit = pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
         let is_packed = pixel_format.ends_with("_CSI2P");
+        let is_color = pixel_format.starts_with("S");
         let first_pixel_green = pixel_format.starts_with("SG");
 
         // Annoyingly, different Rpi cameras have different max analog gain values.
@@ -136,7 +138,7 @@ impl RpiCamera {
                 max_gain,
                 width, height,
                 is_10_bit, is_12_bit, is_packed,
-                first_pixel_green,
+                is_color, first_pixel_green,
                 camera_settings: CaptureParams::new(),
                 sampled: false,
                 setting_changed: false,
@@ -490,6 +492,11 @@ impl AbstractCamera for RpiCamera {
     fn dimensions(&self) -> (i32, i32) {
         let locked_state = self.state.lock().unwrap();
         (locked_state.width as i32, locked_state.height as i32)
+    }
+
+    fn is_color(&self) -> bool {
+        let locked_state = self.state.lock().unwrap();
+        locked_state.is_color
     }
 
     fn sensor_size(&self) -> (f32, f32) {

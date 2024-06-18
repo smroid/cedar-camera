@@ -48,6 +48,10 @@ impl AbstractCamera for ImageCamera {
         (self.image.dimensions().0 as i32, self.image.dimensions().1 as i32)
     }
 
+    fn is_color(&self) -> bool {
+        false
+    }
+
     fn sensor_size(&self) -> (f32, f32) {
         (4.8, 3.6)
     }
