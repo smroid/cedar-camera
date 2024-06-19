@@ -26,10 +26,16 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let mut camera = select_camera(None, 0).unwrap();
+    let sampled = false;
+    let _ = camera.set_sampled(sampled);
     // Ignore cameras that can't set offset.
     let _ = camera.set_offset(Offset::new(3));
 
-    let (width, height) = camera.dimensions();
+    let (mut width, mut height) = camera.dimensions();
+    if sampled {
+        width /= 2;
+        height /= 2;
+    }
     // Central region.
     let roi = Rect::at(width / 2, height / 2).of_size(30, 30);
 
