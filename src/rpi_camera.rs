@@ -49,13 +49,11 @@ struct SharedState {
 
     is_packed: bool,
     is_color: bool,
-    first_pixel_green: bool,
 
     // Current camera settings as set via RpiCamera methods. Will be put into
     // effect when the current exposure finishes, influencing the following
     // exposures.
     camera_settings: CaptureParams,
-    sampled: bool,
     setting_changed: bool,
 
     // Zero means go fast as camerea frames are available.
@@ -120,7 +118,6 @@ impl RpiCamera {
         let is_10_bit = pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
         let is_packed = pixel_format.ends_with("_CSI2P");
         let is_color = pixel_format.starts_with("S");
-        let first_pixel_green = pixel_format.starts_with("SG");
 
         // Annoyingly, different Rpi cameras have different max analog gain values.
         let max_gain = match model.as_str() {
@@ -138,9 +135,8 @@ impl RpiCamera {
                 max_gain,
                 width, height,
                 is_10_bit, is_12_bit, is_packed,
-                is_color, first_pixel_green,
+                is_color,
                 camera_settings: CaptureParams::new(),
-                sampled: false,
                 setting_changed: false,
                 update_interval: Duration::ZERO,
                 eta: None,
@@ -194,54 +190,24 @@ impl RpiCamera {
             if state.is_packed {
                 // Convert from packed 10 bit to 8 bit.
                 for row in 0..state.height {
-                    if state.sampled {
-                        // Process every other row. If this is a color image, choose the
-                        // rows that start with a green pixel; if not a color image it
-                        // doesn't matter which rows we choose as long as they are
-                        // every other row.
-                        if state.first_pixel_green {
-                            if (row & 1) == 1 {
-                                continue;
-                            }
-                        } else if (row & 1) == 0 {
-                            continue;
-                        }
-                        let buf_row_start = (row * stride) as usize;
-                        let buf_row_end = buf_row_start + (state.width*5/4) as usize;
-                        let pix_row_start = (row / 2 * state.width / 2) as usize;
-                        let pix_row_end = pix_row_start + state.width / 2 as usize;
-                        for (buf_chunk, pix_chunk)
-                            in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
-                                image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
-                        {
-                            // Keep upper 8 bits; discard 2 lsb. Keep every other pixel
-                            // in row.
-                            let pix0 = buf_chunk[0];
-                            let pix2 = buf_chunk[2];
-                            // pix4 has the lsb values, which we discard.
-                            pix_chunk[0] = pix0;
-                            pix_chunk[1] = pix2;
-                        }
-                    } else {
-                        let buf_row_start = (row * stride) as usize;
-                        let buf_row_end = buf_row_start + (state.width*5/4) as usize;
-                        let pix_row_start = (row * state.width) as usize;
-                        let pix_row_end = pix_row_start + state.width as usize;
-                        for (buf_chunk, pix_chunk)
-                            in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
-                                image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
-                        {
-                            // Keep upper 8 bits; discard 2 lsb.
-                            let pix0 = buf_chunk[0];
-                            let pix1 = buf_chunk[1];
-                            let pix2 = buf_chunk[2];
-                            let pix3 = buf_chunk[3];
-                            // pix4 has the lsb values, which we discard.
-                            pix_chunk[0] = pix0;
-                            pix_chunk[1] = pix1;
-                            pix_chunk[2] = pix2;
-                            pix_chunk[3] = pix3;
-                        }
+                    let buf_row_start = (row * stride) as usize;
+                    let buf_row_end = buf_row_start + (state.width*5/4) as usize;
+                    let pix_row_start = (row * state.width) as usize;
+                    let pix_row_end = pix_row_start + state.width as usize;
+                    for (buf_chunk, pix_chunk)
+                        in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
+                            image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
+                    {
+                        // Keep upper 8 bits; discard 2 lsb.
+                        let pix0 = buf_chunk[0];
+                        let pix1 = buf_chunk[1];
+                        let pix2 = buf_chunk[2];
+                        let pix3 = buf_chunk[3];
+                        // pix4 has the lsb values, which we discard.
+                        pix_chunk[0] = pix0;
+                        pix_chunk[1] = pix1;
+                        pix_chunk[2] = pix2;
+                        pix_chunk[3] = pix3;
                     }
                 }
             } else {
@@ -251,47 +217,20 @@ impl RpiCamera {
             if state.is_packed {
                 // Convert from packed 12 bit to 8 bit.
                 for row in 0..state.height {
-                    if state.sampled {
-                        // Process every other row. If this is a color image, choose the
-                        // rows that start with a green pixel; if not a color image it
-                        // doesn't matter which rows we choose as long as they are
-                        // every other row.
-                        if state.first_pixel_green {
-                            if (row & 1) == 1 {
-                                continue;
-                            }
-                        } else if (row & 1) == 0 {
-                            continue;
-                        }
-                        let buf_row_start = (row * stride) as usize;
-                        let buf_row_end = buf_row_start + (state.width*3/2) as usize;
-                        let pix_row_start = (row / 2 * state.width / 2) as usize;
-                        let pix_row_end = pix_row_start + (state.width / 2) as usize;
-                        for (buf_chunk, pix)
-                            in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
-                                image_data[pix_row_start..pix_row_end].iter_mut())
-                        {
-                            // Keep upper 8 bits; discard 4 lsb. Keep every other pixel.
-                            let pix0 = buf_chunk[0];
-                            // pix2 has the lsb values, which we discard.
-                            *pix = pix0;
-                        }
-                    } else {
-                        let buf_row_start = (row * stride) as usize;
-                        let buf_row_end = buf_row_start + (state.width*3/2) as usize;
-                        let pix_row_start = (row * state.width) as usize;
-                        let pix_row_end = pix_row_start + state.width as usize;
-                        for (buf_chunk, pix_pair)
-                            in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
-                                image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
-                        {
-                            // Keep upper 8 bits; discard 4 lsb.
-                            let pix0 = buf_chunk[0];
-                            let pix1 = buf_chunk[1];
-                            // pix2 has the lsb values, which we discard.
-                            pix_pair[0] = pix0;
-                            pix_pair[1] = pix1;
-                        }
+                    let buf_row_start = (row * stride) as usize;
+                    let buf_row_end = buf_row_start + (state.width*3/2) as usize;
+                    let pix_row_start = (row * state.width) as usize;
+                    let pix_row_end = pix_row_start + state.width as usize;
+                    for (buf_chunk, pix_pair)
+                        in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
+                            image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
+                    {
+                        // Keep upper 8 bits; discard 4 lsb.
+                        let pix0 = buf_chunk[0];
+                        let pix1 = buf_chunk[1];
+                        // pix2 has the lsb values, which we discard.
+                        pix_pair[0] = pix0;
+                        pix_pair[1] = pix1;
                     }
                 }
             } else {
@@ -430,19 +369,14 @@ impl RpiCamera {
                 let buf_data = planes.get(0).unwrap();
 
                 // Allocate uninitialized storage to receive the converted image data.
-                let (out_width, out_height) = if locked_state.sampled {
-                    (locked_state.width / 2, locked_state.height / 2)
-                } else {
-                    (locked_state.width, locked_state.height)
-                };
-                let num_pixels = out_width * out_height;
+                let num_pixels = locked_state.width * locked_state.height;
 
                 let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
                 unsafe { image_data.set_len(num_pixels as usize) }
 
                 Self::convert_to_8bit(stride, &buf_data, &mut image_data, &locked_state);
                 let image = GrayImage::from_raw(
-                    out_width as u32, out_height as u32, image_data).unwrap();
+                    locked_state.width as u32, locked_state.height as u32, image_data).unwrap();
 
                 let metadata = req.metadata();
                 let temperature = Celsius(metadata.get::<SensorTemperature>().unwrap().0 as i32);
@@ -543,21 +477,6 @@ impl AbstractCamera for RpiCamera {
     }
     fn get_offset(&self) -> Offset {
         Offset::new(0)
-    }
-
-    fn set_sampled(&mut self, sampled: bool) -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
-        if locked_state.sampled != sampled {
-            locked_state.most_recent_capture = None;
-            // We don't need to set `setting_changed` because we can apply the
-            // changed `sampled` value to the next sensor image.
-        }
-        locked_state.sampled = sampled;
-        Ok(())
-    }
-    fn get_sampled(&self) -> bool {
-        let locked_state = self.state.lock().unwrap();
-        locked_state.sampled
     }
 
     fn set_update_interval(&mut self, update_interval: Duration)

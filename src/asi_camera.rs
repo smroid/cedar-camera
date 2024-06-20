@@ -10,7 +10,7 @@ use log::{debug, info, warn};
 
 use asi_camera2::asi_camera2_sdk;
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
-                             Celsius, EnumeratedCameraInfo, Gain, Offset, sample_2x2};
+                             Celsius, EnumeratedCameraInfo, Gain, Offset};
 
 pub struct ASICamera {
     // The SDK wrapper object. After initialization, the video capture thread is
@@ -37,7 +37,6 @@ struct SharedState {
     // effect when the current exposure finishes, influencing the following
     // exposure.
     camera_settings: CaptureParams,
-    sampled: bool,
     setting_changed: bool,
 
     // Zero means go fast as camerea frames are available.
@@ -128,7 +127,6 @@ impl ASICamera {
             info, default_gain, min_gain, max_gain,
             state: Arc::new(Mutex::new(SharedState{
                 camera_settings: CaptureParams::new(),
-                sampled: false,
                 setting_changed: false,
                 update_interval: Duration::ZERO,
                 eta: None,
@@ -296,11 +294,8 @@ impl ASICamera {
                             Celsius(0)
                         }
                     };
-                    let mut image = GrayImage::from_raw(width as u32, height as u32,
-                                                        image_data).unwrap();
-                    if locked_state.sampled {
-                        image = sample_2x2(image);
-                    }
+                    let image = GrayImage::from_raw(width as u32, height as u32,
+                                                    image_data).unwrap();
                     locked_state.most_recent_capture = Some(CapturedImage {
                         capture_params: locked_state.camera_settings,
                         image: Arc::new(image),
@@ -417,21 +412,6 @@ impl AbstractCamera for ASICamera {
     fn get_offset(&self) -> Offset {
         let locked_state = self.state.lock().unwrap();
         locked_state.camera_settings.offset
-    }
-
-    fn set_sampled(&mut self, sampled: bool) -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
-        if locked_state.sampled != sampled {
-            locked_state.most_recent_capture = None;
-            // We don't need to set `setting_changed` because we can apply the
-            // changed `sampled` value to the next sensor image.
-        }
-        locked_state.sampled = sampled;
-        Ok(())
-    }
-    fn get_sampled(&self) -> bool {
-        let locked_state = self.state.lock().unwrap();
-        locked_state.sampled
     }
 
     fn set_update_interval(&mut self, update_interval: Duration)

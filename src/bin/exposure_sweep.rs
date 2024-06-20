@@ -1,11 +1,12 @@
 use std::time::Duration;
+use std::ops::Deref;
 
 use clap::Parser;
 use env_logger;
 use log::info;
 use imageproc::rect::Rect;
 
-use cedar_camera::abstract_camera::{Gain, Offset};
+use cedar_camera::abstract_camera::{Gain, Offset, bin_2x2};
 use cedar_camera::select_camera::select_camera;
 use cedar_detect::algorithm::{estimate_background_from_image_region};
 
@@ -26,16 +27,10 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let mut camera = select_camera(None, 0).unwrap();
-    let sampled = false;
-    let _ = camera.set_sampled(sampled);
     // Ignore cameras that can't set offset.
     let _ = camera.set_offset(Offset::new(3));
 
-    let (mut width, mut height) = camera.dimensions();
-    if sampled {
-        width /= 2;
-        height /= 2;
-    }
+    let (width, height) = camera.dimensions();
     // Central region.
     let roi = Rect::at(width / 2, height / 2).of_size(30, 30);
 
@@ -49,9 +44,16 @@ async fn main() {
                 camera.capture_image(Some(frame_id)).await.unwrap();
             frame_id = new_frame_id;
 
-            // Move captured_image's image data into a GrayImage.
             let image = &captured_image.image;
-            let (background, noise) = estimate_background_from_image_region(image, &roi);
+            let (background, noise);
+            if camera.is_color() {
+                // Bayer grid will exhibit high noise. Do a 2x2 downsample which is
+                // a poor-man's debayering.
+                let mono_image = bin_2x2(image.deref().clone());
+                (background, noise) = estimate_background_from_image_region(&mono_image, &roi);
+            } else {
+                (background, noise) = estimate_background_from_image_region(image, &roi);
+            }
             info!("gain {}, exp time {}ms; background/noise {}/{}",
                   gain, exp_ms, background, noise);
 
