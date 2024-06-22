@@ -85,7 +85,12 @@ pub struct CapturedImage {
     /// occurred.
     pub capture_params: CaptureParams,
 
-    /// Pixel data stored in row major order.
+    /// 8 bit pixel data stored in row major order. For color cameras, the raw
+    /// values of the photosites are returned (linearly scaled to 8 bits); no
+    /// demosaicing is done. The caller is responsible for dealing with the
+    /// Bayer patterning of color sensor; a simple approach used by Cedar Detect
+    /// is to apply a simple 2x2 binning which yields a workable luma value
+    /// suitable for detecting and centroiding stars.
     pub image: Arc<GrayImage>,
 
     pub readout_time: SystemTime,
