@@ -45,7 +45,6 @@ async fn main() {
     let _ = camera.set_offset(Offset::new(args.offset));
 
     camera.set_gain(Gain::new(args.gain)).unwrap();
-//    camera.set_sampled(true);
 
     let exposure_time_millisec = args.exposure_time;
     camera.set_exposure_duration(Duration::from_micros(
