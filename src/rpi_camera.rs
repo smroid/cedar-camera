@@ -110,7 +110,7 @@ impl RpiCamera {
         match cfgs.validate() {
             CameraConfigurationStatus::Valid => (),
             CameraConfigurationStatus::Adjusted => {
-                warn!("Camera configuration was adjusted: {:#?}", cfgs);
+                debug!("Camera configuration was adjusted: {:#?}", cfgs);
             },
             CameraConfigurationStatus::Invalid => {
                 return Err(failed_precondition_error(
@@ -138,7 +138,7 @@ impl RpiCamera {
             "imx296" => true,
             _ => false,
         };
-        info!("inverted {}", is_inverted);
+        debug!("inverted {}", is_inverted);
 
         let mut cam = RpiCamera{
             model: model.to_string(),

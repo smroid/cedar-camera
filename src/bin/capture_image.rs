@@ -49,9 +49,7 @@ async fn main() {
     let exposure_time_millisec = args.exposure_time;
     camera.set_exposure_duration(Duration::from_micros(
         exposure_time_millisec as u64 * 1000)).unwrap();
-    println!("capture_image");
     let (captured_image, _frame_id) = camera.capture_image(None).await.unwrap();
-    println!("finished capture_image");
 
     // Move captured_image's image data into a GrayImage.
     let image = &captured_image.image;
