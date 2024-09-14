@@ -19,43 +19,42 @@ pub enum CameraInterface {
 //   indicates which interface's camera is to be returned.
 // * `camera_index` controls which camera (on the selected interface) is
 //   returned.
-pub fn select_camera(camera_interface: Option<CameraInterface>,
+pub fn select_camera(mut camera_interface: Option<CameraInterface>,
                      camera_index: i32) -> Result<Box<dyn AbstractCamera + Send>, CanonicalError> {
     // Enumerate cameras on supported interfaces.
     let asi_cameras = ASICamera::enumerate_cameras();
     let rpi_cameras = RpiCamera::enumerate_cameras();
-    if asi_cameras.len() == 0 && rpi_cameras.len() == 0 {
+    if asi_cameras.is_empty() && rpi_cameras.is_empty() {
         return Err(not_found_error("No camera found"));
     }
-    if asi_cameras.len() > 0 && rpi_cameras.len() == 0 {
+    if !asi_cameras.is_empty() && rpi_cameras.is_empty() {
         if let Some(ci) = camera_interface {
             if ci != CameraInterface::ASI {
                 return Err(failed_precondition_error(
                     format!("Only ASI camera found but {:?} was requested", ci).as_str()));
             }
         }
-        return Ok(Box::new(ASICamera::new(camera_index).unwrap()));
+        camera_interface = Some(CameraInterface::ASI);
     }
-    if rpi_cameras.len() > 0 && asi_cameras.len() == 0 {
+    if !rpi_cameras.is_empty() && asi_cameras.is_empty() {
         if let Some(ci) = camera_interface {
             if ci != CameraInterface::Rpi {
                 return Err(failed_precondition_error(
                     format!("Only Rpi camera found but {:?} was requested", ci).as_str()));
             }
         }
-        return Ok(Box::new(RpiCamera::new(camera_index).unwrap()));
+        camera_interface = Some(CameraInterface::Rpi);
     }
-    // Both camera interfaces are present.
     match camera_interface {
         None => {
             Err(failed_precondition_error(
                 "Both ASI and Rpi cameras found but no 'camera_interface' selector was passed"))
         },
         Some(CameraInterface::ASI) => {
-            Ok(Box::new(ASICamera::new(camera_index).unwrap()))
+            Ok(Box::new(ASICamera::new(camera_index)?))
         },
         Some(CameraInterface::Rpi) => {
-            Ok(Box::new(RpiCamera::new(camera_index).unwrap()))
+            Ok(Box::new(RpiCamera::new(camera_index)?))
         },
     }
 }
