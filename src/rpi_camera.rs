@@ -61,7 +61,7 @@ struct SharedState {
     camera_settings: CaptureParams,
     setting_changed: bool,
 
-    // Zero means go fast as camerea frames are available.
+    // Zero means go fast as camera frames are available.
     update_interval: Duration,
 
     // Estimated time at which `most_recent_capture` will next be updated.
