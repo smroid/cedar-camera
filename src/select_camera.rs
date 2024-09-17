@@ -19,7 +19,7 @@ pub enum CameraInterface {
 //   indicates which interface's camera is to be returned.
 // * `camera_index` controls which camera (on the selected interface) is
 //   returned.
-pub fn select_camera(mut camera_interface: Option<CameraInterface>,
+pub fn select_camera(mut camera_interface: Option<&CameraInterface>,
                      camera_index: i32) -> Result<Box<dyn AbstractCamera + Send>, CanonicalError> {
     // Enumerate cameras on supported interfaces.
     let asi_cameras = ASICamera::enumerate_cameras();
@@ -29,21 +29,21 @@ pub fn select_camera(mut camera_interface: Option<CameraInterface>,
     }
     if !asi_cameras.is_empty() && rpi_cameras.is_empty() {
         if let Some(ci) = camera_interface {
-            if ci != CameraInterface::ASI {
+            if *ci != CameraInterface::ASI {
                 return Err(failed_precondition_error(
                     format!("Only ASI camera found but {:?} was requested", ci).as_str()));
             }
         }
-        camera_interface = Some(CameraInterface::ASI);
+        camera_interface = Some(&CameraInterface::ASI);
     }
     if !rpi_cameras.is_empty() && asi_cameras.is_empty() {
         if let Some(ci) = camera_interface {
-            if ci != CameraInterface::Rpi {
+            if *ci != CameraInterface::Rpi {
                 return Err(failed_precondition_error(
                     format!("Only Rpi camera found but {:?} was requested", ci).as_str()));
             }
         }
-        camera_interface = Some(CameraInterface::Rpi);
+        camera_interface = Some(&CameraInterface::Rpi);
     }
     match camera_interface {
         None => {
