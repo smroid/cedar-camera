@@ -142,6 +142,11 @@ pub trait AbstractCamera {
     fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError>;
     fn get_offset(&self) -> Offset;
 
+    /// Determines whether image is inverted (rot180) during readout. Default
+    /// is false.
+    fn set_inverted(&mut self, inverted: bool) -> Result<(), CanonicalError>;
+    fn get_inverted(&self) -> bool;
+
     // Determines how often an image is captured for return in capture_image().
     // An interval of zero means run continuously-- images are captured as soon
     // as they become available in the camera.

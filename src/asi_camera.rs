@@ -37,6 +37,7 @@ struct SharedState {
     // effect when the current exposure finishes, influencing the following
     // exposure.
     camera_settings: CaptureParams,
+    inverted: bool,
     setting_changed: bool,
 
     // Zero means go fast as camera frames are available.
@@ -54,6 +55,7 @@ struct SharedState {
 
     // Camera settings in effect when the in-progress capture started.
     current_capture_settings: CaptureParams,
+    current_capture_inverted: bool,
 }
 
 impl ASICamera {
@@ -127,6 +129,7 @@ impl ASICamera {
             info, default_gain, min_gain, max_gain,
             state: Arc::new(Mutex::new(SharedState{
                 camera_settings: CaptureParams::new(),
+                inverted: false,
                 setting_changed: false,
                 update_interval: Duration::ZERO,
                 eta: None,
@@ -134,6 +137,7 @@ impl ASICamera {
                 frame_id: 0,
                 stop_request: false,
                 current_capture_settings: CaptureParams::new(),
+                current_capture_inverted: false,
             })),
             video_capture_thread: None,
         };
@@ -193,6 +197,7 @@ impl ASICamera {
                 update_interval = locked_state.update_interval;
                 let new_settings = &locked_state.camera_settings;
                 let old_settings = &locked_state.current_capture_settings;
+                let old_inverted = locked_state.current_capture_inverted;
                 if locked_state.stop_request {
                     debug!("Stopping video capture");
                     if let Err(e) = locked_sdk.stop_video_capture() {
@@ -236,8 +241,23 @@ impl ASICamera {
                               new_settings.offset, &e.to_string());
                     }
                 }
+                if starting || locked_state.inverted != old_inverted {
+                    let value = if locked_state.inverted {
+                        asi_camera2_sdk::ASI_FLIP_STATUS_ASI_FLIP_BOTH
+                    } else {
+                        asi_camera2_sdk::ASI_FLIP_STATUS_ASI_FLIP_NONE
+                    } as i64;
+                    if let Err(e) = locked_sdk.set_control_value(
+                        asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_FLIP,
+                        value, /*auto=*/false)
+                    {
+                        warn!("Error setting inverted to {}: {}",
+                              locked_state.inverted, &e.to_string());
+                    }
+                }
                 // We're done processing the new settings, they're now current.
                 locked_state.current_capture_settings = locked_state.camera_settings;
+                locked_state.current_capture_inverted = locked_state.inverted;
                 if starting {
                     if let Err(e) = locked_sdk.start_video_capture() {
                         warn!("Error starting video capture: {:?}; resetting and retrying", e);
@@ -412,6 +432,19 @@ impl AbstractCamera for ASICamera {
     fn get_offset(&self) -> Offset {
         let locked_state = self.state.lock().unwrap();
         locked_state.camera_settings.offset
+    }
+
+    fn set_inverted(&mut self, inverted: bool) -> Result<(), CanonicalError> {
+        let mut locked_state = self.state.lock().unwrap();
+        if locked_state.inverted != inverted {
+            ASICamera::changed_setting(&mut locked_state);
+        }
+        locked_state.inverted = inverted;
+        Ok(())
+    }
+    fn get_inverted(&self) -> bool {
+        let locked_state = self.state.lock().unwrap();
+        locked_state.inverted
     }
 
     fn set_update_interval(&mut self, update_interval: Duration)

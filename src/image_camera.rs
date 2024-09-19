@@ -7,6 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use canonical_error::{CanonicalError};
 use image::GrayImage;
+use image::imageops::rotate180;
 
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
                              Celsius, Gain, Offset};
@@ -17,6 +18,7 @@ pub struct ImageCamera {
 
     offset: Offset,
     gain: Gain,
+    inverted: bool,
 
     // Most recent completed capture and its id value.
     most_recent_capture: Option<CapturedImage>,
@@ -29,6 +31,7 @@ impl ImageCamera {
                        exposure_duration: Duration::from_millis(100),
                        offset: Offset::new(3),
                        gain: Gain::new(50),
+                       inverted: false,
                        most_recent_capture: None,
                        frame_id: 0,})
     }
@@ -80,6 +83,14 @@ impl AbstractCamera for ImageCamera {
         self.offset
     }
 
+    fn set_inverted(&mut self, inverted: bool) -> Result<(), CanonicalError> {
+        self.inverted = inverted;
+        Ok(())
+    }
+    fn get_inverted(&self) -> bool {
+        self.inverted
+    }
+
     fn set_update_interval(&mut self, _update_interval: Duration)
                            -> Result<(), CanonicalError> {
         Ok(())
@@ -93,7 +104,10 @@ impl AbstractCamera for ImageCamera {
             self.most_recent_capture = None;
         }
         if self.most_recent_capture.is_none() {
-            let image = self.image.deref().clone();
+            let mut image = self.image.deref().clone();
+            if self.inverted {
+                image = rotate180(&image);
+            }
             self.most_recent_capture = Some(CapturedImage {
                 capture_params: CaptureParams {
                     exposure_duration: self.get_exposure_duration(),

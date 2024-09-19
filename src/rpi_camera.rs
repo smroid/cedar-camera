@@ -50,10 +50,13 @@ struct SharedState {
     is_packed: bool,
     is_color: bool,
 
+    // Whether image should be inverted, according to set_inverted() API.
+    inverted: bool,
+
     // We use the convention that the Rpi camera should produce an upright image
     // when the module is rotated to have the connector at the bottom. Some modules
     // are inverted (rot180) with respect to this, so we correct during readout.
-    is_inverted: bool,
+    correct_invert: bool,
 
     // Current camera settings as set via RpiCamera methods. Will be put into
     // effect when the current exposure finishes, influencing the following
@@ -134,11 +137,11 @@ impl RpiCamera {
 
         // Unfortunately the libcamera API's Rotation property doesn't seem to correlate
         // with our connector-oriented definition. Figure it out based on the model.
-        let is_inverted = match model.as_str() {
+        let correct_invert = match model.as_str() {
             "imx296" => true,
             _ => false,
         };
-        debug!("inverted {}", is_inverted);
+        debug!("correct_invert {}", correct_invert);
 
         let mut cam = RpiCamera{
             model: model.to_string(),
@@ -148,7 +151,9 @@ impl RpiCamera {
                 max_gain,
                 width, height,
                 is_10_bit, is_12_bit, is_packed,
-                is_color, is_inverted,
+                is_color,
+                inverted: false,
+                correct_invert,
                 camera_settings: CaptureParams::new(),
                 setting_changed: false,
                 update_interval: Duration::ZERO,
@@ -199,17 +204,18 @@ impl RpiCamera {
                        buf_data: &[u8],
                        image_data: &mut Vec<u8>,
                        state: &MutexGuard<SharedState>) {
+        let inverted = state.inverted ^ state.correct_invert;
         if state.is_10_bit {
             if state.is_packed {
                 // Convert from packed 10 bit to 8 bit.
                 for row in 0..state.height {
-                    let out_row = if state.is_inverted { state.height - row - 1 } else { row };
+                    let out_row = if inverted { state.height - row - 1 } else { row };
 
                     let buf_row_start = (row * stride) as usize;
                     let buf_row_end = buf_row_start + (state.width*5/4) as usize;
                     let pix_row_start = (out_row * state.width) as usize;
                     let pix_row_end = pix_row_start + state.width as usize;
-                    if state.is_inverted {
+                    if inverted {
                         for (buf_chunk, pix_chunk)
                             in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
                                 image_data[pix_row_start..pix_row_end].rchunks_exact_mut(4))
@@ -250,13 +256,13 @@ impl RpiCamera {
             if state.is_packed {
                 // Convert from packed 12 bit to 8 bit.
                 for row in 0..state.height {
-                    let out_row = if state.is_inverted { state.height - row - 1 } else { row };
+                    let out_row = if inverted { state.height - row - 1 } else { row };
 
                     let buf_row_start = (row * stride) as usize;
                     let buf_row_end = buf_row_start + (state.width*3/2) as usize;
                     let pix_row_start = (out_row * state.width) as usize;
                     let pix_row_end = pix_row_start + state.width as usize;
-                    if state.is_inverted {
+                    if inverted {
                         for (buf_chunk, pix_pair)
                             in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
                                 image_data[pix_row_start..pix_row_end].rchunks_exact_mut(2))
@@ -412,7 +418,8 @@ impl RpiCamera {
                 exp_duration = locked_state.camera_settings.exposure_duration;
 
                 // Grab the image.
-                let framebuffer: &MemoryMappedFrameBuffer<FrameBuffer> = req.buffer(&stream).unwrap();
+                let framebuffer: &MemoryMappedFrameBuffer<FrameBuffer> =
+                    req.buffer(&stream).unwrap();
                 // Raw format has only one data plane containing bayer or mono data.
                 let planes = framebuffer.data();
                 let buf_data = planes.get(0).unwrap();
@@ -526,6 +533,19 @@ impl AbstractCamera for RpiCamera {
     }
     fn get_offset(&self) -> Offset {
         Offset::new(0)
+    }
+
+    fn set_inverted(&mut self, inverted: bool) -> Result<(), CanonicalError> {
+        let mut locked_state = self.state.lock().unwrap();
+        if locked_state.inverted != inverted {
+            RpiCamera::changed_setting(&mut locked_state);
+        }
+        locked_state.inverted = inverted;
+        Ok(())
+    }
+    fn get_inverted(&self) -> bool {
+        let locked_state = self.state.lock().unwrap();
+        locked_state.inverted
     }
 
     fn set_update_interval(&mut self, update_interval: Duration)
