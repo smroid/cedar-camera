@@ -106,7 +106,6 @@ impl AbstractCamera for ImageCamera {
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
-        log::info!("image_camera.capture_image");  // TEMPORARY
         let now = Instant::now();
         if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
             let interval = cmp::max(self.exposure_duration, self.update_interval);
