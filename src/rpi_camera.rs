@@ -394,6 +394,7 @@ impl RpiCamera {
                 state.lock().unwrap().eta = None;
             }
             // Time to grab a frame.
+            // TODO: don't die on timeout.
             let mut req = rx.recv_timeout(Duration::from_secs(5)).expect("Camera request failed");
             last_frame_time = Some(Instant::now());
             {
@@ -497,6 +498,7 @@ impl AbstractCamera for RpiCamera {
         // For Rpi cameras, we choose the lowest analog gain that yields at
         // least about 0.5 ADU of noise at typical exposure durations.
         // We don't use digital gain.
+        // TODO: use max analog gain for all models?
         match self.model.as_str() {
             "imx296" => Gain::new(100),
             _ => Gain::new(50),  // Reasonable value for various Rpi cameras.
