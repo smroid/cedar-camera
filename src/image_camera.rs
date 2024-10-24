@@ -1,6 +1,7 @@
 // Fake camera that yields a fixed image. For testing.
 
-use std::time::{Duration, SystemTime};
+use std::cmp;
+use std::time::{Duration, Instant, SystemTime};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -20,9 +21,13 @@ pub struct ImageCamera {
     gain: Gain,
     inverted: bool,
 
+    // Zero means go fast as camera frames are available.
+    update_interval: Duration,
+
     // Most recent completed capture and its id value.
     most_recent_capture: Option<CapturedImage>,
     frame_id: i32,
+    last_frame_time: Instant,
 }
 
 impl ImageCamera {
@@ -32,8 +37,10 @@ impl ImageCamera {
                        offset: Offset::new(3),
                        gain: Gain::new(50),
                        inverted: false,
+                       update_interval: Duration::ZERO,
                        most_recent_capture: None,
-                       frame_id: 0,})
+                       frame_id: 0,
+                       last_frame_time: Instant::now(),})
     }
 }
 
@@ -91,15 +98,21 @@ impl AbstractCamera for ImageCamera {
         self.inverted
     }
 
-    fn set_update_interval(&mut self, _update_interval: Duration)
+    fn set_update_interval(&mut self, update_interval: Duration)
                            -> Result<(), CanonicalError> {
+        self.update_interval = update_interval;
         Ok(())
     }
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
+        log::info!("image_camera.capture_image");  // TEMPORARY
+        let now = Instant::now();
         if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
-            tokio::time::sleep(self.exposure_duration).await;
+            let interval = cmp::max(self.exposure_duration, self.update_interval);
+            let next_frame_time = self.last_frame_time + interval;
+            let sleep_interval = next_frame_time.saturating_duration_since(now);
+            tokio::time::sleep(sleep_interval).await;
             self.frame_id += 1;
             self.most_recent_capture = None;
         }
@@ -118,13 +131,20 @@ impl AbstractCamera for ImageCamera {
                 readout_time: SystemTime::now(),
                 temperature: Celsius(20),
             });
+            self.last_frame_time = now;
         }
         Ok((self.most_recent_capture.clone().unwrap(), self.frame_id))
     }
 
     fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
         if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
-            Some(self.exposure_duration)
+            let interval = cmp::max(self.exposure_duration, self.update_interval);
+            let next_frame_time = self.last_frame_time + interval;
+            let now = Instant::now();
+            if now >= next_frame_time {
+                return Some(Duration::ZERO);
+            }
+            Some(next_frame_time - now)
         } else {
             Some(Duration::ZERO)
         }
