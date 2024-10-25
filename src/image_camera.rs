@@ -116,6 +116,7 @@ impl AbstractCamera for ImageCamera {
             self.most_recent_capture = None;
         }
         if self.most_recent_capture.is_none() {
+            self.last_frame_time = now;
             let mut image = self.image.deref().clone();
             if self.inverted {
                 image = rotate180(&image);
@@ -130,7 +131,6 @@ impl AbstractCamera for ImageCamera {
                 readout_time: SystemTime::now(),
                 temperature: Celsius(20),
             });
-            self.last_frame_time = now;
         }
         Ok((self.most_recent_capture.clone().unwrap(), self.frame_id))
     }
