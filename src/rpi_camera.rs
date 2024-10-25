@@ -382,12 +382,12 @@ impl RpiCamera {
             }
 
             // Is it time to grab a frame?
-            let now = Instant::now();
             if let Some(lft) = last_frame_time {
                 let next_update_time = lft + update_interval;
+                let now = Instant::now();
                 if next_update_time > now {
                     let delay = next_update_time - now;
-                    state.lock().unwrap().eta = Some(Instant::now() + delay);
+                    state.lock().unwrap().eta = Some(now + delay);
                     std::thread::sleep(delay);
                     continue;
                 }

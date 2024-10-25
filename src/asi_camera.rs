@@ -270,12 +270,12 @@ impl ASICamera {
             }  // state.lock().
 
             // Is it time to grab a frame?
-            let now = Instant::now();
             if last_frame_time.is_some() {
                 let next_update_time = last_frame_time.unwrap() + update_interval;
+                let now = Instant::now();
                 if next_update_time > now {
                     let delay = next_update_time - now;
-                    state.lock().unwrap().eta = Some(Instant::now() + delay);
+                    state.lock().unwrap().eta = Some(now + delay);
                     std::thread::sleep(delay);
                     continue;
                 }
@@ -283,7 +283,7 @@ impl ASICamera {
             }
 
             // Time to grab a frame.
-            last_frame_time = Some(now);
+            last_frame_time = Some(Instant::now());
 
             // Allocate uninitialized storage to receive the image data.
             let num_pixels:usize = width * height;

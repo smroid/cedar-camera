@@ -106,17 +106,16 @@ impl AbstractCamera for ImageCamera {
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
-        let now = Instant::now();
         if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
             let interval = cmp::max(self.exposure_duration, self.update_interval);
             let next_frame_time = self.last_frame_time + interval;
-            let sleep_interval = next_frame_time.saturating_duration_since(now);
+            let sleep_interval = next_frame_time.saturating_duration_since(Instant::now());
             tokio::time::sleep(sleep_interval).await;
             self.frame_id += 1;
             self.most_recent_capture = None;
         }
         if self.most_recent_capture.is_none() {
-            self.last_frame_time = now;
+            self.last_frame_time = Instant::now();
             let mut image = self.image.deref().clone();
             if self.inverted {
                 image = rotate180(&image);
