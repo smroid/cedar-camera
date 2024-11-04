@@ -32,15 +32,17 @@ pub struct ImageCamera {
 
 impl ImageCamera {
     pub fn new(image: GrayImage) -> Result<Self, CanonicalError> {
-        Ok(ImageCamera{image: Arc::new(image),
-                       exposure_duration: Duration::from_millis(100),
-                       offset: Offset::new(3),
-                       gain: Gain::new(50),
-                       inverted: false,
-                       update_interval: Duration::ZERO,
-                       most_recent_capture: None,
-                       frame_id: 0,
-                       last_frame_time: Instant::now(),})
+        let mut ic = ImageCamera{image: Arc::new(image),
+                                 exposure_duration: Duration::from_millis(100),
+                                 offset: Offset::new(3),
+                                 gain: Gain::new(50),
+                                 inverted: false,
+                                 update_interval: Duration::ZERO,
+                                 most_recent_capture: None,
+                                 frame_id: 0,
+                                 last_frame_time: Instant::now(),};
+        ic.capture_image();
+        Ok(ic)
     }
 
     fn capture_image(&mut self) {
