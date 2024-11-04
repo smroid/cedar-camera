@@ -42,6 +42,25 @@ impl ImageCamera {
                        frame_id: 0,
                        last_frame_time: Instant::now(),})
     }
+
+    fn capture_image(&mut self) {
+        let mut image = self.image.deref().clone();
+        if self.inverted {
+            image = rotate180(&image);
+        }
+        self.most_recent_capture = Some(CapturedImage {
+            capture_params: CaptureParams {
+                exposure_duration: self.get_exposure_duration(),
+                gain: self.get_gain(),
+                offset: self.get_offset(),
+            },
+            image: Arc::new(image),
+            readout_time: SystemTime::now(),
+            temperature: Celsius(20),
+        });
+        self.frame_id += 1;
+        self.last_frame_time = Instant::now();
+    }
 }
 
 #[async_trait]
@@ -106,32 +125,35 @@ impl AbstractCamera for ImageCamera {
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
-        if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
-            let interval = cmp::max(self.exposure_duration, self.update_interval);
-            let next_frame_time = self.last_frame_time + interval;
-            let sleep_interval = next_frame_time.saturating_duration_since(Instant::now());
+        let need_new_image =
+            prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id;
+        let interval = cmp::max(self.exposure_duration, self.update_interval);
+        let next_frame_time = self.last_frame_time + interval;
+        let sleep_interval = next_frame_time.saturating_duration_since(Instant::now());
+        if sleep_interval == Duration::ZERO {
+            self.capture_image();
+        } else if need_new_image {
             tokio::time::sleep(sleep_interval).await;
-            self.frame_id += 1;
-            self.most_recent_capture = None;
-        }
-        if self.most_recent_capture.is_none() {
-            self.last_frame_time = Instant::now();
-            let mut image = self.image.deref().clone();
-            if self.inverted {
-                image = rotate180(&image);
-            }
-            self.most_recent_capture = Some(CapturedImage {
-                capture_params: CaptureParams {
-                    exposure_duration: self.get_exposure_duration(),
-                    gain: self.get_gain(),
-                    offset: self.get_offset(),
-                },
-                image: Arc::new(image),
-                readout_time: SystemTime::now(),
-                temperature: Celsius(20),
-            });
+            self.capture_image();
         }
         Ok((self.most_recent_capture.clone().unwrap(), self.frame_id))
+    }
+
+    async fn try_capture_image(
+        &mut self, prev_frame_id: Option<i32>)
+        -> Result<Option<(CapturedImage, i32)>, CanonicalError>
+    {
+        let need_new_image =
+            prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id;
+        let interval = cmp::max(self.exposure_duration, self.update_interval);
+        let next_frame_time = self.last_frame_time + interval;
+        let sleep_interval = next_frame_time.saturating_duration_since(Instant::now());
+        if sleep_interval == Duration::ZERO {
+            self.capture_image();
+        } else if need_new_image {
+            return Ok(None);
+        }
+        Ok(Some((self.most_recent_capture.clone().unwrap(), self.frame_id)))
     }
 
     fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {

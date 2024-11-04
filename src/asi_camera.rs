@@ -13,7 +13,7 @@ use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
                              Celsius, EnumeratedCameraInfo, Gain, Offset};
 
 pub struct ASICamera {
-    // The SDK wrapper object. After initialization, the video capture thread is
+    // The SDK wrapper object. After initialization, the capture thread is
     // the only thing that touches asi_cam_sdk.
     asi_cam_sdk: Arc<Mutex<asi_camera2_sdk::ASICamera>>,
 
@@ -24,14 +24,14 @@ pub struct ASICamera {
     min_gain: i32,
     max_gain: i32,
 
-    // Our state, shared between ASICamera methods and the video capture thread.
+    // Our state, shared between ASICamera methods and the capture thread.
     state: Arc<Mutex<SharedState>>,
 
-    // Our video capture thread. Executes worker().
-    video_capture_thread: Option<tokio::task::JoinHandle<()>>,
+    // Our capture thread. Executes worker().
+    capture_thread: Option<tokio::task::JoinHandle<()>>,
 }
 
-// State shared between video capture thread and the ASICamera methods.
+// State shared between capture thread and the ASICamera methods.
 struct SharedState {
     // Current camera settings as set via ASICamera methods. Will be put into
     // effect when the current exposure finishes, influencing the following
@@ -50,7 +50,7 @@ struct SharedState {
     most_recent_capture: Option<CapturedImage>,
     frame_id: i32,
 
-    // Set by stop(); the video capture thread exits when it sees this.
+    // Set by stop(); the capture thread exits when it sees this.
     stop_request: bool,
 
     // Camera settings in effect when the in-progress capture started.
@@ -139,7 +139,7 @@ impl ASICamera {
                 current_capture_settings: CaptureParams::new(),
                 current_capture_inverted: false,
             })),
-            video_capture_thread: None,
+            capture_thread: None,
         };
         cam.set_gain(cam.optimal_gain())?;
         info!("Created ASICamera API object");
@@ -155,7 +155,7 @@ impl ASICamera {
         locked_state.most_recent_capture = None;
     }
 
-    // The first call to capture_image() starts the video capture thread that
+    // The first call to capture_image() starts the capture thread that
     // executes this function.
     fn worker(min_gain: i32, max_gain: i32,
               width: usize, height: usize,
@@ -199,9 +199,9 @@ impl ASICamera {
                 let old_settings = &locked_state.current_capture_settings;
                 let old_inverted = locked_state.current_capture_inverted;
                 if locked_state.stop_request {
-                    debug!("Stopping video capture");
+                    debug!("Stopping capture");
                     if let Err(e) = locked_sdk.stop_video_capture() {
-                        warn!("Error stopping video capture: {}", &e.to_string());
+                        warn!("Error stopping capture: {}", &e.to_string());
                     }
                     locked_state.stop_request = false;
                     return;  // Exit thread.
@@ -260,11 +260,11 @@ impl ASICamera {
                 locked_state.current_capture_inverted = locked_state.inverted;
                 if starting {
                     if let Err(e) = locked_sdk.start_video_capture() {
-                        warn!("Error starting video capture: {:?}; resetting and retrying", e);
+                        warn!("Error starting capture: {:?}; resetting and retrying", e);
                         recover_camera = true;
                         continue;
                     }
-                    debug!("Starting video capture");
+                    debug!("Starting capture");
                     starting = false;
                 }
             }  // state.lock().
@@ -340,7 +340,28 @@ impl ASICamera {
             abstract_gain as i64
         }
     }
-}
+
+    async fn manage_worker_thread(&mut self) {
+        // Has the worker terminated for some reason?
+        if self.capture_thread.is_some() &&
+            self.capture_thread.as_ref().unwrap().is_finished()
+        {
+            self.capture_thread.take().unwrap().await.unwrap();
+        }
+        // Start capture thread if terminated or not yet started.
+        if self.capture_thread.is_none() {
+            let min_gain = self.min_gain;
+            let max_gain = self.max_gain;
+            let width = self.info.MaxWidth as usize;
+            let height = self.info.MaxHeight as usize;
+            let cloned_state = self.state.clone();
+            let cloned_sdk = self.asi_cam_sdk.clone();
+            self.capture_thread = Some(tokio::task::spawn_blocking(move || {
+                ASICamera::worker(min_gain, max_gain, width, height, cloned_state, cloned_sdk);
+            }));
+        }
+    }
+}  // impl ASICamera.
 
 /// We arrange to call stop() when ASICamera object goes out of scope.
 impl Drop for ASICamera {
@@ -456,24 +477,7 @@ impl AbstractCamera for ASICamera {
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
-        // Has the worker terminated for some reason?
-        if self.video_capture_thread.is_some() &&
-            self.video_capture_thread.as_ref().unwrap().is_finished()
-        {
-            self.video_capture_thread.take().unwrap().await.unwrap();
-        }
-        // Start video capture thread if terminated or not yet started.
-        if self.video_capture_thread.is_none() {
-            let min_gain = self.min_gain;
-            let max_gain = self.max_gain;
-            let width = self.info.MaxWidth as usize;
-            let height = self.info.MaxHeight as usize;
-            let cloned_state = self.state.clone();
-            let cloned_sdk = self.asi_cam_sdk.clone();
-            self.video_capture_thread = Some(tokio::task::spawn_blocking(move || {
-                ASICamera::worker(min_gain, max_gain, width, height, cloned_state, cloned_sdk);
-            }));
-        }
+        self.manage_worker_thread().await;
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
         loop {
@@ -500,6 +504,28 @@ impl AbstractCamera for ASICamera {
         }
     }
 
+    async fn try_capture_image(
+        &mut self, prev_frame_id: Option<i32>)
+        -> Result<Option<(CapturedImage, i32)>, CanonicalError>
+    {
+        self.manage_worker_thread().await;
+        // Get the most recently posted image; return None if there is none yet
+        // or the currently posted image's frame id is the same as
+        // `prev_frame_id`.
+        loop {
+            let locked_state = self.state.lock().unwrap();
+            if locked_state.most_recent_capture.is_some() &&
+                (prev_frame_id.is_none() ||
+                 prev_frame_id.unwrap() != locked_state.frame_id)
+            {
+                // Don't consume it, other clients may want it.
+                return Ok(Some((locked_state.most_recent_capture.clone().unwrap(),
+                                locked_state.frame_id)));
+            }
+            return Ok(None);
+        }
+    }
+
     fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
         let locked_state = self.state.lock().unwrap();
         if locked_state.most_recent_capture.is_some() &&
@@ -515,9 +541,9 @@ impl AbstractCamera for ASICamera {
     }
 
     async fn stop(&mut self) {
-        if self.video_capture_thread.is_some() {
+        if self.capture_thread.is_some() {
             self.state.lock().unwrap().stop_request = true;
-            self.video_capture_thread.take().unwrap().await.unwrap();
+            self.capture_thread.take().unwrap().await.unwrap();
         }
     }
 }

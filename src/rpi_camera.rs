@@ -464,7 +464,23 @@ impl RpiCamera {
         let frac = abstract_gain as f64 / 100.0;
         (1.0 + (cam_max_gain as f64 - 1.0) * frac) as f32
     }
-}
+
+    async fn manage_worker_thread(&mut self) {
+        // Has the worker terminated for some reason?
+        if self.capture_thread.is_some() &&
+            self.capture_thread.as_ref().unwrap().is_finished()
+        {
+            self.capture_thread.take().unwrap().await.unwrap();
+        }
+        // Start capture thread if terminated or not yet started.
+        if self.capture_thread.is_none() {
+            let cloned_state = self.state.clone();
+            self.capture_thread = Some(tokio::task::spawn_blocking(move || {
+                RpiCamera::worker(cloned_state);
+            }));
+        }
+    }
+}  // impl RpiCamera.
 
 /// We arrange to call stop() when RpiCamera object goes out of scope.
 impl Drop for RpiCamera {
@@ -562,19 +578,7 @@ impl AbstractCamera for RpiCamera {
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
-        // Has the worker terminated for some reason?
-        if self.capture_thread.is_some() &&
-            self.capture_thread.as_ref().unwrap().is_finished()
-        {
-            self.capture_thread.take().unwrap().await.unwrap();
-        }
-        // Start capture thread if terminated or not yet started.
-        if self.capture_thread.is_none() {
-            let cloned_state = self.state.clone();
-            self.capture_thread = Some(tokio::task::spawn_blocking(move || {
-                RpiCamera::worker(cloned_state);
-            }));
-        }
+        self.manage_worker_thread().await;
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
         loop {
@@ -598,6 +602,28 @@ impl AbstractCamera for RpiCamera {
                 }
             }
             tokio::time::sleep(sleep_duration).await;
+        }
+    }
+
+    async fn try_capture_image(
+        &mut self, prev_frame_id: Option<i32>)
+        -> Result<Option<(CapturedImage, i32)>, CanonicalError>
+    {
+        self.manage_worker_thread().await;
+        // Get the most recently posted image; return none if there is none yet
+        // or the currently posted image's frame id is the same as
+        // `prev_frame_id`.
+        loop {
+            let locked_state = self.state.lock().unwrap();
+            if locked_state.most_recent_capture.is_some() &&
+                (prev_frame_id.is_none() ||
+                 prev_frame_id.unwrap() != locked_state.frame_id)
+            {
+                // Don't consume it, other clients may want it.
+                return Ok(Some((locked_state.most_recent_capture.clone().unwrap(),
+                                locked_state.frame_id)));
+            }
+            return Ok(None);
         }
     }
 

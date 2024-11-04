@@ -176,6 +176,11 @@ pub trait AbstractCamera {
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError>;
 
+    /// Non-blocking variant of `capture_image()`. Returns None if
+    /// `capture_image()` would block.
+    async fn try_capture_image(&mut self, prev_frame_id: Option<i32>)
+                               -> Result<Option<(CapturedImage, i32)>, CanonicalError>;
+
     /// Returns an estimate of how long a call to capture_image() with the given
     /// id will block. None if there is no estimate.
     fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration>;
