@@ -359,7 +359,6 @@ impl RpiCamera {
             for req in reqs {
                 active_cam.queue_request(req).unwrap();
             }
-            // locked_state.current_capture_settings = locked_state.camera_settings;
             info!("Starting capturing");
         }
 
@@ -394,8 +393,13 @@ impl RpiCamera {
                 state.lock().unwrap().eta = None;
             }
             // Time to grab a frame.
-            // TODO: don't die on timeout.
-            let mut req = rx.recv_timeout(Duration::from_secs(5)).expect("Camera request failed");
+            let mut req = match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(req) => req,
+                Err(e) => {
+                    warn!("Camera request failed: {:?}", e);
+                    continue;
+                }
+            };
             last_frame_time = Some(Instant::now());
             {
                 let mut locked_state = state.lock().unwrap();
@@ -476,7 +480,7 @@ impl RpiCamera {
         if self.capture_thread.is_none() {
             let cloned_state = self.state.clone();
             self.capture_thread = Some(tokio::task::spawn_blocking(move || {
-                RpiCamera::worker(cloned_state);
+                Self::worker(cloned_state);
             }));
         }
     }
