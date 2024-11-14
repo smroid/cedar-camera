@@ -357,7 +357,7 @@ impl ASICamera {
             let cloned_state = self.state.clone();
             let cloned_sdk = self.asi_cam_sdk.clone();
             self.capture_thread = Some(tokio::task::spawn_blocking(move || {
-                ASICamera::worker(min_gain, max_gain, width, height, cloned_state, cloned_sdk);
+                Self::worker(min_gain, max_gain, width, height, cloned_state, cloned_sdk);
             }));
         }
     }
