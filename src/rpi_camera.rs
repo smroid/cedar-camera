@@ -28,6 +28,8 @@ pub struct RpiCamera {
     sensor_width: f32,
     sensor_height: f32,
 
+    is_color: bool,
+
     // Our state, shared between RpiCamera methods and the capture thread.
     state: Arc<Mutex<SharedState>>,
 
@@ -48,7 +50,6 @@ struct SharedState {
     is_12_bit: bool,
 
     is_packed: bool,
-    is_color: bool,
 
     // Whether image should be inverted, according to set_inverted() API.
     inverted: bool,
@@ -147,11 +148,11 @@ impl RpiCamera {
             model: model.to_string(),
             sensor_width: width as f32 * pixel_size_nanometers.width as f32 / 1000000.0,
             sensor_height: height as f32 * pixel_size_nanometers.height as f32 / 1000000.0,
+            is_color,
             state: Arc::new(Mutex::new(SharedState{
                 max_gain,
                 width, height,
                 is_10_bit, is_12_bit, is_packed,
-                is_color,
                 inverted: false,
                 correct_invert,
                 camera_settings: CaptureParams::new(),
@@ -203,18 +204,24 @@ impl RpiCamera {
     fn convert_to_8bit(stride: usize,
                        buf_data: &[u8],
                        image_data: &mut Vec<u8>,
-                       state: &MutexGuard<SharedState>) {
-        let inverted = state.inverted ^ state.correct_invert;
-        if state.is_10_bit {
-            if state.is_packed {
+                       width: usize,
+                       height: usize,
+                       inverted: bool,
+                       correct_invert: bool,
+                       is_10_bit: bool,
+                       is_12_bit: bool,
+                       is_packed: bool) {
+        let inverted = inverted ^ correct_invert;
+        if is_10_bit {
+            if is_packed {
                 // Convert from packed 10 bit to 8 bit.
-                for row in 0..state.height {
-                    let out_row = if inverted { state.height - row - 1 } else { row };
+                for row in 0..height {
+                    let out_row = if inverted { height - row - 1 } else { row };
 
                     let buf_row_start = (row * stride) as usize;
-                    let buf_row_end = buf_row_start + (state.width*5/4) as usize;
-                    let pix_row_start = (out_row * state.width) as usize;
-                    let pix_row_end = pix_row_start + state.width as usize;
+                    let buf_row_end = buf_row_start + (width*5/4) as usize;
+                    let pix_row_start = (out_row * width) as usize;
+                    let pix_row_end = pix_row_start + width as usize;
                     if inverted {
                         for (buf_chunk, pix_chunk)
                             in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
@@ -252,16 +259,16 @@ impl RpiCamera {
             } else {
                 panic!("Unpacked raw not yet supported");
             }
-        } else if state.is_12_bit {
-            if state.is_packed {
+        } else if is_12_bit {
+            if is_packed {
                 // Convert from packed 12 bit to 8 bit.
-                for row in 0..state.height {
-                    let out_row = if inverted { state.height - row - 1 } else { row };
+                for row in 0..height {
+                    let out_row = if inverted { height - row - 1 } else { row };
 
                     let buf_row_start = (row * stride) as usize;
-                    let buf_row_end = buf_row_start + (state.width*3/2) as usize;
-                    let pix_row_start = (out_row * state.width) as usize;
-                    let pix_row_end = pix_row_start + state.width as usize;
+                    let buf_row_end = buf_row_start + (width*3/2) as usize;
+                    let pix_row_start = (out_row * width) as usize;
+                    let pix_row_end = pix_row_start + width as usize;
                     if inverted {
                         for (buf_chunk, pix_pair)
                             in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
@@ -340,10 +347,11 @@ impl RpiCamera {
             .map(|buf| MemoryMappedFrameBuffer::new(buf).unwrap())
             .collect::<Vec<_>>();
 
+        let reqs;
         {
             let locked_state = state.lock().unwrap();
             // Create capture requests and attach buffers.
-            let reqs = buffers
+            reqs = buffers
                 .into_iter()
                 .map(|buf| {
                     let mut req = active_cam.create_request(None).unwrap();
@@ -353,14 +361,13 @@ impl RpiCamera {
                     req
                 })
                 .collect::<Vec<_>>();
-
-            // Enqueue all requests to the camera.
-            active_cam.start(None).unwrap();
-            for req in reqs {
-                active_cam.queue_request(req).unwrap();
-            }
-            info!("Starting capturing");
         }
+        // Enqueue all requests to the camera.
+        active_cam.start(None).unwrap();
+        for req in reqs {
+            active_cam.queue_request(req).unwrap();
+        }
+        info!("Starting capturing");
 
         // Keep track of when we grabbed a frame.
         let mut last_frame_time: Option<Instant> = None;
@@ -401,65 +408,85 @@ impl RpiCamera {
                 }
             };
             last_frame_time = Some(Instant::now());
+            let mut do_queue = false;
+            let width;
+            let height;
+            let inverted;
+            let correct_invert;
+            let is_10_bit;
+            let is_12_bit;
+            let is_packed;
             {
                 let mut locked_state = state.lock().unwrap();
+                width = locked_state.width;
+                height = locked_state.height;
+                inverted = locked_state.inverted;
+                correct_invert = locked_state.correct_invert;
+                is_10_bit = locked_state.is_10_bit;
+                is_12_bit = locked_state.is_12_bit;
+                is_packed = locked_state.is_packed;
                 if locked_state.setting_changed {
                     discard_image_count = pipeline_depth;
                     locked_state.setting_changed = false;
                     req.reuse(ReuseFlag::REUSE_BUFFERS);
                     let controls = req.controls_mut();
                     Self::setup_camera_request(controls, &locked_state);
-                    active_cam.queue_request(req).unwrap();
-                    continue;
+                    do_queue = true;
                 }
                 if discard_image_count > 0 {
                     discard_image_count -= 1;
                     req.reuse(ReuseFlag::REUSE_BUFFERS);
                     let controls = req.controls_mut();
                     Self::setup_camera_request(controls, &locked_state);
-                    active_cam.queue_request(req).unwrap();
-                    continue;
+                    do_queue = true;
                 }
                 exp_duration = locked_state.camera_settings.exposure_duration;
-
-                // Grab the image.
-                let framebuffer: &MemoryMappedFrameBuffer<FrameBuffer> =
-                    req.buffer(&stream).unwrap();
-                // Raw format has only one data plane containing bayer or mono data.
-                let planes = framebuffer.data();
-                let buf_data = planes.get(0).unwrap();
-
-                // Allocate uninitialized storage to receive the converted image data.
-                let num_pixels = locked_state.width * locked_state.height;
-
-                let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
-                unsafe { image_data.set_len(num_pixels as usize) }
-
-                Self::convert_to_8bit(stride, &buf_data, &mut image_data, &locked_state);
-                let image = GrayImage::from_raw(
-                    locked_state.width as u32, locked_state.height as u32, image_data).unwrap();
-
-                let metadata = req.metadata();
-                let temperature = Celsius(metadata.get::<SensorTemperature>().unwrap().0 as i32);
-
-                // Re-queue the request.
-                req.reuse(ReuseFlag::REUSE_BUFFERS);
-                let controls = req.controls_mut();
-                Self::setup_camera_request(controls, &locked_state);
-                active_cam.queue_request(req).unwrap();
-
-                if update_interval == Duration::ZERO {
-                    locked_state.eta = Some(Instant::now() + exp_duration);
-                }
-
-                locked_state.most_recent_capture = Some(CapturedImage {
-                    capture_params: locked_state.camera_settings,
-                    image: Arc::new(image),
-                    readout_time: SystemTime::now(),
-                    temperature,
-                });
-                locked_state.frame_id += 1;
             }
+            if do_queue {
+                active_cam.queue_request(req).unwrap();
+                continue;
+            }
+
+            // Grab the image.
+            let framebuffer: &MemoryMappedFrameBuffer<FrameBuffer> =
+                req.buffer(&stream).unwrap();
+            // Raw format has only one data plane containing bayer or mono data.
+            let planes = framebuffer.data();
+            let buf_data = planes.get(0).unwrap();
+
+            // Allocate uninitialized storage to receive the converted image data.
+            let num_pixels = width * height;
+
+            let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
+            unsafe { image_data.set_len(num_pixels as usize) }
+
+            Self::convert_to_8bit(stride, &buf_data, &mut image_data,
+                                  width, height, inverted, correct_invert,
+                                  is_10_bit, is_12_bit, is_packed);
+            let image = GrayImage::from_raw(
+                width as u32, height as u32, image_data).unwrap();
+
+            let metadata = req.metadata();
+            let temperature = Celsius(metadata.get::<SensorTemperature>().unwrap().0 as i32);
+
+            // Re-queue the request.
+            req.reuse(ReuseFlag::REUSE_BUFFERS);
+            let controls = req.controls_mut();
+            let mut locked_state = state.lock().unwrap();
+            Self::setup_camera_request(controls, &locked_state);
+            active_cam.queue_request(req).unwrap();
+
+            if update_interval == Duration::ZERO {
+                locked_state.eta = Some(Instant::now() + exp_duration);
+            }
+
+            locked_state.most_recent_capture = Some(CapturedImage {
+                capture_params: locked_state.camera_settings,
+                image: Arc::new(image),
+                readout_time: SystemTime::now(),
+                temperature,
+            });
+            locked_state.frame_id += 1;
         }  // loop.
     }  // worker().
 
@@ -506,8 +533,7 @@ impl AbstractCamera for RpiCamera {
     }
 
     fn is_color(&self) -> bool {
-        let locked_state = self.state.lock().unwrap();
-        locked_state.is_color
+        self.is_color
     }
 
     fn sensor_size(&self) -> (f32, f32) {
