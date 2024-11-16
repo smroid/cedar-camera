@@ -541,14 +541,7 @@ impl AbstractCamera for RpiCamera {
     }
 
     fn optimal_gain(&self) -> Gain {
-        // For Rpi cameras, we choose the lowest analog gain that yields at
-        // least about 0.5 ADU of noise at typical exposure durations.
-        // We don't use digital gain.
-        // TODO: use max analog gain for all models?
-        match self.model.as_str() {
-            "imx296" => Gain::new(100),
-            _ => Gain::new(50),  // Reasonable value for various Rpi cameras.
-        }
+        Gain::new(100)
     }
 
     fn set_exposure_duration(&mut self, exp_duration: Duration)
