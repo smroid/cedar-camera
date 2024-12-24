@@ -27,6 +27,7 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let mut camera = select_camera(None, 0).unwrap();
+    info!("camera: {}", camera.model());
     // Ignore cameras that can't set offset.
     let _ = camera.set_offset(Offset::new(3));
 
@@ -50,7 +51,11 @@ async fn main() {
                 // Bayer grid will exhibit high noise. Do a 2x2 downsample which is
                 // a poor-man's debayering.
                 let mono_image = bin_2x2(image.deref().clone());
-                (background, noise) = estimate_background_from_image_region(&mono_image, &roi);
+                let (binned_width, binned_height) = mono_image.dimensions();
+                let binned_roi = Rect::at(
+                    binned_width as i32 / 2, binned_height as i32 / 2).of_size(30, 30);
+                (background, noise) = estimate_background_from_image_region(
+                    &mono_image, &binned_roi);
             } else {
                 (background, noise) = estimate_background_from_image_region(image, &roi);
             }
