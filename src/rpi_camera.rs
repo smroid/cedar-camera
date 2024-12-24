@@ -10,7 +10,7 @@ use libcamera::{
     camera::{CameraConfigurationStatus},
     camera_manager::CameraManager,
     control::ControlList,
-    controls::{AeEnable, AnalogueGain, ExposureTime, SensorTemperature},
+    controls::{AeEnable, AnalogueGain, ExposureTime},
     framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
     framebuffer_map::MemoryMappedFrameBuffer,
     properties,
@@ -19,11 +19,9 @@ use libcamera::{
 };
 
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
-                             Celsius, EnumeratedCameraInfo, Gain, Offset};
+                             EnumeratedCameraInfo, Gain, Offset};
 
 pub struct RpiCamera {
-    model: String,
-
     // Dimensions, in mm, of the sensor.
     sensor_width: f32,
     sensor_height: f32,
@@ -39,6 +37,8 @@ pub struct RpiCamera {
 
 // State shared between capture thread and the RpiCamera methods.
 struct SharedState {
+    model: String,
+
     // Different models have different max analog gain. Min analog gain is always 1.
     max_gain: i32,
 
@@ -145,11 +145,11 @@ impl RpiCamera {
         debug!("correct_invert {}", correct_invert);
 
         let mut cam = RpiCamera{
-            model: model.to_string(),
             sensor_width: width as f32 * pixel_size_nanometers.width as f32 / 1000000.0,
             sensor_height: height as f32 * pixel_size_nanometers.height as f32 / 1000000.0,
             is_color,
             state: Arc::new(Mutex::new(SharedState{
+                model: model.to_string(),
                 max_gain,
                 width, height,
                 is_10_bit, is_12_bit, is_packed,
@@ -310,8 +310,13 @@ impl RpiCamera {
 
         // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
-        // started. We need to discard a few images after a setting change.
-        let pipeline_depth = 5;  // TODO: why isn't this just two?
+        // started. We need to discard a number of images after a setting change.
+        let pipeline_depth = match state.lock().unwrap().model.as_str() {
+            "imx477" => 6,
+            "imx296" => 4,
+            _ => 5,
+        };
+
         let mut discard_image_count = 0;
 
         let mgr = CameraManager::new().unwrap();
@@ -432,8 +437,7 @@ impl RpiCamera {
                     let controls = req.controls_mut();
                     Self::setup_camera_request(controls, &locked_state);
                     do_queue = true;
-                }
-                if discard_image_count > 0 {
+                } else if discard_image_count > 0 {
                     discard_image_count -= 1;
                     req.reuse(ReuseFlag::REUSE_BUFFERS);
                     let controls = req.controls_mut();
@@ -466,9 +470,6 @@ impl RpiCamera {
             let image = GrayImage::from_raw(
                 width as u32, height as u32, image_data).unwrap();
 
-            let metadata = req.metadata();
-            let temperature = Celsius(metadata.get::<SensorTemperature>().unwrap().0 as i32);
-
             // Re-queue the request.
             req.reuse(ReuseFlag::REUSE_BUFFERS);
             let controls = req.controls_mut();
@@ -480,13 +481,14 @@ impl RpiCamera {
                 locked_state.eta = Some(Instant::now() + exp_duration);
             }
 
-            locked_state.most_recent_capture = Some(CapturedImage {
-                capture_params: locked_state.camera_settings,
-                image: Arc::new(image),
-                readout_time: SystemTime::now(),
-                temperature,
-            });
-            locked_state.frame_id += 1;
+            if !locked_state.setting_changed {
+                locked_state.most_recent_capture = Some(CapturedImage {
+                    capture_params: locked_state.camera_settings,
+                    image: Arc::new(image),
+                    readout_time: SystemTime::now(),
+                });
+                locked_state.frame_id += 1;
+            }
         }  // loop.
     }  // worker().
 
@@ -524,7 +526,8 @@ impl Drop for RpiCamera {
 #[async_trait]
 impl AbstractCamera for RpiCamera {
     fn model(&self) -> String {
-        self.model.clone()
+        let locked_state = self.state.lock().unwrap();
+        locked_state.model.clone()
     }
 
     fn dimensions(&self) -> (i32, i32) {

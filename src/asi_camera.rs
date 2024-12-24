@@ -10,7 +10,7 @@ use log::{debug, info, warn};
 
 use asi_camera2::asi_camera2_sdk;
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
-                             Celsius, EnumeratedCameraInfo, Gain, Offset};
+                             EnumeratedCameraInfo, Gain, Offset};
 
 pub struct ASICamera {
     // The SDK wrapper object. After initialization, the capture thread is
@@ -306,21 +306,12 @@ impl ASICamera {
                     discard_image_count = pipeline_depth;
                     locked_state.setting_changed = false;
                 } else {
-                    let temp = match locked_sdk.get_control_value(
-                        asi_camera2_sdk::ASI_CONTROL_TYPE_ASI_TEMPERATURE) {
-                        Ok(x) => { Celsius((x.0 / 10) as i32) },
-                        Err(e) => {
-                            warn!("Error getting temperature: {}", &e.to_string());
-                            Celsius(0)
-                        }
-                    };
                     let image = GrayImage::from_raw(width as u32, height as u32,
                                                     image_data).unwrap();
                     locked_state.most_recent_capture = Some(CapturedImage {
                         capture_params: locked_state.camera_settings,
                         image: Arc::new(image),
                         readout_time: SystemTime::now(),
-                        temperature: temp,
                     });
                     locked_state.frame_id += 1;
                 }

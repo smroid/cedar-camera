@@ -11,7 +11,7 @@ use image::GrayImage;
 use image::imageops::rotate180;
 
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
-                             Celsius, Gain, Offset};
+                             Gain, Offset};
 
 pub struct ImageCamera {
     image: Arc<GrayImage>,
@@ -58,7 +58,6 @@ impl ImageCamera {
             },
             image: Arc::new(image),
             readout_time: SystemTime::now(),
-            temperature: Celsius(20),
         });
         self.frame_id += 1;
         self.last_frame_time = Instant::now();

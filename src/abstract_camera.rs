@@ -94,7 +94,6 @@ pub struct CapturedImage {
     pub image: Arc<GrayImage>,
 
     pub readout_time: SystemTime,
-    pub temperature: Celsius,
 }
 
 /// AbstractCamera models an 8-bit greyscale camera. This trait defines methods
