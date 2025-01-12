@@ -1,3 +1,6 @@
+// Copyright (c) 2023 Steven Rosenthal smr@dt3.org
+// See LICENSE file in root directory for license terms.
+
 use canonical_error::{CanonicalError, failed_precondition_error, unimplemented_error};
 
 use async_trait::async_trait;
