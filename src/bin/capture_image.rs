@@ -62,6 +62,5 @@ async fn main() {
     image.save(filename).unwrap();
 
     let datetime: DateTime<Local> = captured_image.readout_time.into();
-    info!("Image obtained at {} with temperature {}",
-          datetime.format("%d/%m/%Y %T"), captured_image.temperature.0);
+    info!("Image obtained at {}", datetime.format("%d/%m/%Y %T"));
 }
