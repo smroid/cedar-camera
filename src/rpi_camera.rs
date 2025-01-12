@@ -45,6 +45,10 @@ struct SharedState {
     width: usize,
     height: usize,
 
+    pisp_compressed: bool,
+    pisp_compression_mode: i32,
+
+    // The next three fields are ignored if PiSP compression (previous field) is used.
     // If neither is true, then it is 8 bits.
     is_10_bit: bool,
     is_12_bit: bool,
@@ -123,10 +127,18 @@ impl RpiCamera {
         }
         let stream_config = cfgs.get(0).unwrap();
         let pixel_format = format!("{:?}", stream_config.get_pixel_format());
+	// See https://git.libcamera.org/libcamera/libcamera.git/tree/src/libcamera/formats.cpp
+	let pisp_compressed = pixel_format.ends_with("PISP_COMP1");
+	let pisp_compression_mode = 1;
         let is_12_bit = pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
         let is_10_bit = pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
         let is_packed = pixel_format.ends_with("_CSI2P");
-        let is_color = pixel_format.starts_with("S");
+	let is_color;
+	if pisp_compressed {
+	    is_color = pixel_format != "MONO_PISP_COMP1";
+	} else {
+            is_color = pixel_format.starts_with("S");
+	}
 
         // Annoyingly, different Rpi cameras have different max analog gain values.
         let max_gain = match model.as_str() {
@@ -152,6 +164,7 @@ impl RpiCamera {
                 model: model.to_string(),
                 max_gain,
                 width, height,
+		pisp_compressed, pisp_compression_mode,
                 is_10_bit, is_12_bit, is_packed,
                 inverted: false,
                 correct_invert,
