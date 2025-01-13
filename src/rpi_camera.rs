@@ -23,6 +23,7 @@ use libcamera::{
 
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
                              EnumeratedCameraInfo, Gain, Offset};
+use crate::pisp_compression;
 
 pub struct RpiCamera {
     // Dimensions, in mm, of the sensor.
@@ -48,6 +49,7 @@ struct SharedState {
     width: usize,
     height: usize,
 
+    // Raspberry Pi 5 and later use a PiSP compressed raw mode.
     pisp_compressed: bool,
     pisp_compression_mode: i32,
 
@@ -130,15 +132,26 @@ impl RpiCamera {
         }
         let stream_config = cfgs.get(0).unwrap();
         let pixel_format = format!("{:?}", stream_config.get_pixel_format());
+
 	// See https://git.libcamera.org/libcamera/libcamera.git/tree/src/libcamera/formats.cpp
-	let pisp_compressed = pixel_format.ends_with("PISP_COMP1");
-	let pisp_compression_mode = 1;
+	let pisp_compressed = pixel_format.contains("PISP_COMP");
+	let pisp_compression_mode =
+	    if pisp_compressed {
+		match pixel_format.chars().last().unwrap() {
+		    '1' => 1,
+		    '2' => 2,
+		    '3' => 3,
+		    _ => panic!("Unexpected PiSP compression mode {}", pixel_format),
+		}
+	    } else {
+		0  // Don't care.
+	    };
         let is_12_bit = pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
         let is_10_bit = pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
         let is_packed = pixel_format.ends_with("_CSI2P");
 	let is_color;
 	if pisp_compressed {
-	    is_color = pixel_format != "MONO_PISP_COMP1";
+	    is_color = !pixel_format.contains("MONO");
 	} else {
             is_color = pixel_format.starts_with("S");
 	}
@@ -204,7 +217,6 @@ impl RpiCamera {
     }
 
     // Convert 10 or 12 bit pixels to 8 bits, by keeping the upper 8 bits.
-    //
     // About raw color images: Because CedarDetect works with monochrome data,
     // if the captured image is raw color (Bayer) we need to convert to
     // grayscale. We do so not by debayering (interpolating color into each
@@ -434,6 +446,8 @@ impl RpiCamera {
             let height;
             let inverted;
             let correct_invert;
+	    let pisp_compressed;
+	    let pisp_compression_mode;
             let is_10_bit;
             let is_12_bit;
             let is_packed;
@@ -443,6 +457,8 @@ impl RpiCamera {
                 height = locked_state.height;
                 inverted = locked_state.inverted;
                 correct_invert = locked_state.correct_invert;
+		pisp_compressed = locked_state.pisp_compressed;
+		pisp_compression_mode = locked_state.pisp_compression_mode;
                 is_10_bit = locked_state.is_10_bit;
                 is_12_bit = locked_state.is_12_bit;
                 is_packed = locked_state.is_packed;
@@ -476,13 +492,18 @@ impl RpiCamera {
 
             // Allocate uninitialized storage to receive the converted image data.
             let num_pixels = width * height;
-
             let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
             unsafe { image_data.set_len(num_pixels as usize) }
 
-            Self::convert_to_8bit(stride, &buf_data, &mut image_data,
-                                  width, height, inverted, correct_invert,
-                                  is_10_bit, is_12_bit, is_packed);
+	    if pisp_compressed {
+		pisp_compression::uncompress(stride, &buf_data, &mut image_data,
+					     width, height, inverted, correct_invert,
+					     pisp_compression_mode);
+	    } else {
+		Self::convert_to_8bit(stride, &buf_data, &mut image_data,
+                                      width, height, inverted, correct_invert,
+                                      is_10_bit, is_12_bit, is_packed);
+	    }
             let image = GrayImage::from_raw(
                 width as u32, height as u32, image_data).unwrap();
 
