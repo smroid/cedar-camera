@@ -16,6 +16,7 @@ use libcamera::{
     controls::{AeEnable, AnalogueGain, ExposureTime},
     framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
     framebuffer_map::MemoryMappedFrameBuffer,
+    geometry,
     properties,
     request::{ReuseFlag},
     stream::StreamRole,
@@ -117,7 +118,20 @@ impl RpiCamera {
         let pixel_array_size = props.get::<properties::PixelArraySize>().unwrap();
         let width = pixel_array_size.width as usize;
         let height = pixel_array_size.height as usize;
-        let pixel_size_nanometers = props.get::<properties::UnitCellSize>().unwrap();
+        let pixel_size_nanometers = match props.get::<properties::UnitCellSize>() {
+            Ok(psn) => psn,
+            Err(e) => {
+                // Some sensors are missing this static property.
+                if model.as_str() == "ov9281" {
+                    properties::UnitCellSize(geometry::Size{width: 3896000,
+                                                            height: 2453000})
+                } else {
+                    return Err(failed_precondition_error(
+                        format!("Missing properties::UnitCellSize: {:?}",
+                                e).as_str()));
+                }
+            },
+        };
         // This will generate default configuration for Raw.
         let mut cfgs = cam.generate_configuration(&[StreamRole::Raw]).unwrap();
         match cfgs.validate() {
@@ -340,8 +354,12 @@ impl RpiCamera {
         // in-progress exposure, because the old settings were in effect when it
         // started. We need to discard a number of images after a setting change.
         let pipeline_depth = match state.lock().unwrap().model.as_str() {
+            // These values are determined empirically by using the exposure_sweep
+            // test program.
             "imx477" => 6,
             "imx296" => 4,
+            "ov5647" => 4,
+            "ov9281" => 3,
             _ => 5,
         };
 
