@@ -37,7 +37,7 @@ pub struct RpiCamera {
     state: Arc<Mutex<SharedState>>,
 
     // Our capture thread. Executes worker().
-    capture_thread: Option<tokio::task::JoinHandle<()>>,
+    capture_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 // State shared between capture thread and the RpiCamera methods.
@@ -424,7 +424,6 @@ impl RpiCamera {
         let mut last_frame_time: Option<Instant> = None;
         loop {
             let update_interval: Duration;
-            let exp_duration: Duration;
             {
                 let mut locked_state = state.lock().unwrap();
                 update_interval = locked_state.update_interval;
@@ -469,6 +468,7 @@ impl RpiCamera {
             let is_10_bit;
             let is_12_bit;
             let is_packed;
+            let exp_duration: Duration;
             {
                 let mut locked_state = state.lock().unwrap();
                 width = locked_state.width;
@@ -558,13 +558,21 @@ impl RpiCamera {
         if self.capture_thread.is_some() &&
             self.capture_thread.as_ref().unwrap().is_finished()
         {
-            self.capture_thread.take().unwrap().await.unwrap();
+            self.capture_thread.take().unwrap();
         }
         // Start capture thread if terminated or not yet started.
         if self.capture_thread.is_none() {
             let cloned_state = self.state.clone();
-            self.capture_thread = Some(tokio::task::spawn_blocking(move || {
-                Self::worker(cloned_state);
+            // Allocate a thread for concurrent execution of image acquisition
+            // and uncompressing with other activities.
+            self.capture_thread = Some(std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("rpi_camera")
+                    .build().unwrap();
+                runtime.block_on(async move {
+                    Self::worker(cloned_state);
+                });
             }));
         }
     }
@@ -725,7 +733,7 @@ impl AbstractCamera for RpiCamera {
     async fn stop(&mut self) {
         if self.capture_thread.is_some() {
             self.state.lock().unwrap().stop_request = true;
-            self.capture_thread.take().unwrap().await.unwrap();
+            self.capture_thread.take().unwrap();
         }
     }
 }

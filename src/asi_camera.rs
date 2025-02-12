@@ -31,7 +31,7 @@ pub struct ASICamera {
     state: Arc<Mutex<SharedState>>,
 
     // Our capture thread. Executes worker().
-    capture_thread: Option<tokio::task::JoinHandle<()>>,
+    capture_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 // State shared between capture thread and the ASICamera methods.
@@ -340,7 +340,7 @@ impl ASICamera {
         if self.capture_thread.is_some() &&
             self.capture_thread.as_ref().unwrap().is_finished()
         {
-            self.capture_thread.take().unwrap().await.unwrap();
+            self.capture_thread.take().unwrap();
         }
         // Start capture thread if terminated or not yet started.
         if self.capture_thread.is_none() {
@@ -350,8 +350,17 @@ impl ASICamera {
             let height = self.info.MaxHeight as usize;
             let cloned_state = self.state.clone();
             let cloned_sdk = self.asi_cam_sdk.clone();
-            self.capture_thread = Some(tokio::task::spawn_blocking(move || {
-                Self::worker(min_gain, max_gain, width, height, cloned_state, cloned_sdk);
+            // Allocate a thread for concurrent execution of image acquisition
+            // with other activities.
+            self.capture_thread = Some(std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("asi_camera")
+                    .build().unwrap();
+                runtime.block_on(async move {
+                    Self::worker(
+                        min_gain, max_gain, width, height, cloned_state, cloned_sdk);
+                });
             }));
         }
     }
@@ -537,7 +546,7 @@ impl AbstractCamera for ASICamera {
     async fn stop(&mut self) {
         if self.capture_thread.is_some() {
             self.state.lock().unwrap().stop_request = true;
-            self.capture_thread.take().unwrap().await.unwrap();
+            self.capture_thread.take().unwrap();
         }
     }
 }
