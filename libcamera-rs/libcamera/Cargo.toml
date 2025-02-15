@@ -1,0 +1,35 @@
+[package]
+name = "libcamera"
+version = "0.3.0"
+edition = "2021"
+description = "Safe Rust bindings for libcamera"
+documentation = "https://docs.rs/libcamera"
+repository = "https://github.com/lit-robotics/libcamera-rs"
+license = "MIT OR Apache-2.0"
+keywords = ["libcamera", "camera"]
+categories = ["api-bindings", "computer-vision", "multimedia"]
+readme = "../README.md"
+
+[features]
+default = ["vendor_draft", "libcamera_semver_versioning"]
+
+# Fallback to semver compatible libcamera control/property bindings when exact version is unavailable
+libcamera_semver_versioning = []
+
+# Enables draft vendor control/property extensions
+vendor_draft = []
+# Enables Raspbbery Pi control/property extensions
+vendor_rpi = []
+
+[dependencies]
+bitflags = "2.0.0-rc.2"
+drm-fourcc = "2.2"
+libc = "0.2"
+libcamera-sys = { path = "../libcamera-sys", version = "0.3.0", default-features = false }
+num_enum = "0.6.1"
+smallvec = "1.10"
+thiserror = "1.0"
+
+[build-dependencies]
+semver = "1.0.22"
+pkg-config = "0.3"

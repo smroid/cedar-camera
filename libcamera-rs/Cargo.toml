@@ -1,0 +1,9 @@
+[workspace]
+
+members = [
+    "libcamera-meta",
+    "libcamera-sys",
+    "libcamera",
+]
+
+resolver = "2"
