@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use libcamera::{
-    camera::{CameraConfigurationStatus},
+    camera::{Camera, CameraConfiguration, CameraConfigurationStatus},
     camera_manager::CameraManager,
     control::ControlList,
     controls::{AeEnable, AnalogueGain, ExposureTime},
@@ -98,11 +98,12 @@ impl RpiCamera {
             let cam = cameras.get(i).unwrap();
             let props = cam.properties();
             let model = props.get::<properties::Model>().unwrap();
-            let pixel_array_size = props.get::<properties::PixelArraySize>().unwrap();
+            let cfgs = Self::get_camera_configs(&cam).unwrap();
+            let stream_config = cfgs.get(0).unwrap();
             answer.push(EnumeratedCameraInfo{
                 model: model.to_string(),
-                width: pixel_array_size.width,
-                height: pixel_array_size.height})
+                width: stream_config.get_size().width,
+                height: stream_config.get_size().height})
         }
         answer
     }
@@ -113,18 +114,19 @@ impl RpiCamera {
         let mgr = CameraManager::new().unwrap();
         let cameras = mgr.cameras();
         let cam = cameras.get(camera_index as usize).unwrap();
+        let cfgs = Self::get_camera_configs(&cam)?;
+        let stream_config = cfgs.get(0).unwrap();
         let props = cam.properties();
         let model = props.get::<properties::Model>().unwrap();
-        let pixel_array_size = props.get::<properties::PixelArraySize>().unwrap();
-        let width = pixel_array_size.width as usize;
-        let height = pixel_array_size.height as usize;
+        let width = stream_config.get_size().width as usize;
+        let height = stream_config.get_size().height as usize;
         let pixel_size_nanometers = match props.get::<properties::UnitCellSize>() {
             Ok(psn) => psn,
             Err(e) => {
                 // Some sensors are missing this static property.
                 if model.as_str() == "ov9281" {
-                    properties::UnitCellSize(geometry::Size{width: 3896000,
-                                                            height: 2453000})
+                    properties::UnitCellSize(geometry::Size{width: 3000,
+                                                            height: 3000})
                 } else {
                     return Err(failed_precondition_error(
                         format!("Missing properties::UnitCellSize: {:?}",
@@ -132,19 +134,6 @@ impl RpiCamera {
                 }
             },
         };
-        // This will generate default configuration for Raw.
-        let mut cfgs = cam.generate_configuration(&[StreamRole::Raw]).unwrap();
-        match cfgs.validate() {
-            CameraConfigurationStatus::Valid => (),
-            CameraConfigurationStatus::Adjusted => {
-                debug!("Camera configuration was adjusted: {:#?}", cfgs);
-            },
-            CameraConfigurationStatus::Invalid => {
-                return Err(failed_precondition_error(
-                    format!("Camera configuration was rejected: {:#?}", cfgs).as_str()));
-            },
-        }
-        let stream_config = cfgs.get(0).unwrap();
         let pixel_format = format!("{:?}", stream_config.get_pixel_format());
 
 	// See https://git.libcamera.org/libcamera/libcamera.git/tree/src/libcamera/formats.cpp
@@ -173,6 +162,7 @@ impl RpiCamera {
         // Annoyingly, different Rpi cameras have different max analog gain values.
         let max_gain = match model.as_str() {
             "imx477" => 22,
+            "imx462" => 35,
             "imx296" => 15,
             _ => 63,
         };
@@ -210,6 +200,24 @@ impl RpiCamera {
         };
         cam.set_gain(cam.optimal_gain())?;
         Ok(cam)
+    }
+
+    fn get_camera_configs(cam: &Camera)
+                          -> Result<CameraConfiguration, CanonicalError>
+    {
+        // This will generate default configuration for Raw.
+        let mut cfgs = cam.generate_configuration(&[StreamRole::Raw]).unwrap();
+        match cfgs.validate() {
+            CameraConfigurationStatus::Valid => (),
+            CameraConfigurationStatus::Adjusted => {
+                debug!("Camera configuration was adjusted: {:#?}", cfgs);
+            },
+            CameraConfigurationStatus::Invalid => {
+                return Err(failed_precondition_error(
+                    format!("Camera configuration was rejected: {:#?}", cfgs).as_str()));
+            },
+        }
+        Ok(cfgs)
     }
 
     // This function is called whenever a camera setting is changed. The most
@@ -357,6 +365,7 @@ impl RpiCamera {
             // These values are determined empirically by using the exposure_sweep
             // test program.
             "imx477" => 6,
+            "imx462" => 3,
             "imx296" => 4,
             "ov5647" => 4,
             "ov9281" => 3,
