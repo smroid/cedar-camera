@@ -162,7 +162,7 @@ impl RpiCamera {
         // Annoyingly, different Rpi cameras have different max analog gain values.
         let max_gain = match model.as_str() {
             "imx477" => 22,
-            "imx462" => 35,
+            "imx290" => 35,  // AKA imx462.
             "imx296" => 15,
             _ => 63,
         };
@@ -365,7 +365,7 @@ impl RpiCamera {
             // These values are determined empirically by using the exposure_sweep
             // test program.
             "imx477" => 6,
-            "imx462" => 3,
+            "imx290" => 3,
             "imx296" => 4,
             "ov5647" => 4,
             "ov9281" => 3,
