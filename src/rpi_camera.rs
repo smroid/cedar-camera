@@ -13,7 +13,8 @@ use libcamera::{
     camera::{Camera, CameraConfiguration, CameraConfigurationStatus},
     camera_manager::CameraManager,
     control::ControlList,
-    controls::{AeEnable, AnalogueGain, ExposureTime},
+    controls::{AeEnable, AnalogueGain, AwbEnable,
+               ExposureTime, NoiseReductionMode},
     framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
     framebuffer_map::MemoryMappedFrameBuffer,
     geometry,
@@ -44,7 +45,8 @@ pub struct RpiCamera {
 struct SharedState {
     model: String,
 
-    // Different models have different max analog gain. Min analog gain is always 1.
+    // Different models have different min/max analog gain.
+    min_gain: i32,
     max_gain: i32,
 
     width: usize,
@@ -159,7 +161,12 @@ impl RpiCamera {
             is_color = pixel_format.starts_with("S");
 	}
 
-        // Annoyingly, different Rpi cameras have different max analog gain values.
+        // Annoyingly, different Rpi cameras have different analog gain values.
+        let min_gain = match model.as_str() {
+            "imx290" => 5,  // AKA imx462.
+            _ => 1,
+        };
+        debug!("min_gain {}", min_gain);
         let max_gain = match model.as_str() {
             "imx477" => 22,
             "imx290" => 35,  // AKA imx462.
@@ -182,7 +189,7 @@ impl RpiCamera {
             is_color,
             state: Arc::new(Mutex::new(SharedState{
                 model: model.to_string(),
-                max_gain,
+                min_gain, max_gain,
                 width, height,
 		pisp_compressed, pisp_compression_mode,
                 is_10_bit, is_12_bit, is_packed,
@@ -234,8 +241,11 @@ impl RpiCamera {
         let exp_duration_micros = settings.exposure_duration.as_micros();
         let abstract_gain = settings.gain.value();
         controls.set(AeEnable(false)).unwrap();
+        controls.set(AwbEnable(false)).unwrap();
         controls.set(ExposureTime(exp_duration_micros as i32)).unwrap();
-        controls.set(AnalogueGain(Self::cam_gain(abstract_gain, state.max_gain))).unwrap();
+        controls.set(AnalogueGain(Self::cam_gain(
+            abstract_gain, state.min_gain, state.max_gain))).unwrap();
+        controls.set(NoiseReductionMode::Off).unwrap();
     }
 
     // Convert 10 or 12 bit pixels to 8 bits, by keeping the upper 8 bits.
@@ -557,9 +567,10 @@ impl RpiCamera {
     }  // worker().
 
     // Translate our 0..100 into the camera min/max range for analog gain.
-    fn cam_gain(abstract_gain: i32, cam_max_gain: i32) -> f32 {
+    fn cam_gain(abstract_gain: i32, cam_min_gain: i32, cam_max_gain: i32) -> f32 {
         let frac = abstract_gain as f64 / 100.0;
-        (1.0 + (cam_max_gain as f64 - 1.0) * frac) as f32
+        let cmg = cam_min_gain as f64;
+        (cmg + (cam_max_gain as f64 - cmg) * frac) as f32
     }
 
     async fn manage_worker_thread(&mut self) {
