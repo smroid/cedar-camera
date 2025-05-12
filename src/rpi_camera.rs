@@ -169,7 +169,7 @@ impl RpiCamera {
         debug!("min_gain {}", min_gain);
         let max_gain = match model.as_str() {
             "imx477" => 22,
-            "imx290" => 35,  // AKA imx462.
+            "imx290" => 50,  // AKA imx462.
             "imx296" => 15,
             _ => 63,
         };
