@@ -13,10 +13,12 @@ use libcamera::{
     camera::{Camera, CameraConfiguration, CameraConfigurationStatus},
     camera_manager::CameraManager,
     control::ControlList,
-    controls::{AnalogueGain, AwbEnable, ExposureTime, NoiseReductionMode},
+    controls::{AnalogueGain, AeEnable, AwbEnable,
+               ExposureTime, NoiseReductionMode},
     framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
     framebuffer_map::MemoryMappedFrameBuffer,
     geometry,
+    logging::{log_set_target, LoggingTarget},
     properties,
     request::{ReuseFlag},
     stream::StreamRole,
@@ -239,6 +241,7 @@ impl RpiCamera {
         let settings = &state.camera_settings;
         let exp_duration_micros = settings.exposure_duration.as_micros();
         let abstract_gain = settings.gain.value();
+        controls.set(AeEnable(false)).unwrap();
         controls.set(AwbEnable(false)).unwrap();
         controls.set(ExposureTime(exp_duration_micros as i32)).unwrap();
         controls.set(AnalogueGain(Self::cam_gain(
@@ -383,6 +386,10 @@ impl RpiCamera {
         let mut discard_image_count = 0;
 
         let mgr = CameraManager::new().unwrap();
+        // Setting AeEnable(false) in setup_camera_request causes the libcamera C
+        // implementation to log spurious warnings. I was unable to set the log
+        // level to Error, so just turn off libcamera's logging for now.
+        log_set_target(LoggingTarget::None).unwrap();
         let cameras = mgr.cameras();
         let cam = cameras.get(0).expect("No cameras found");
         let mut active_cam = cam.acquire().expect("Unable to acquire camera");
