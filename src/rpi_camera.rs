@@ -13,8 +13,7 @@ use libcamera::{
     camera::{Camera, CameraConfiguration, CameraConfigurationStatus},
     camera_manager::CameraManager,
     control::ControlList,
-    controls::{AeEnable, AnalogueGain, AwbEnable,
-               ExposureTime, NoiseReductionMode},
+    controls::{AnalogueGain, AwbEnable, ExposureTime, NoiseReductionMode},
     framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
     framebuffer_map::MemoryMappedFrameBuffer,
     geometry,
@@ -240,7 +239,6 @@ impl RpiCamera {
         let settings = &state.camera_settings;
         let exp_duration_micros = settings.exposure_duration.as_micros();
         let abstract_gain = settings.gain.value();
-        controls.set(AeEnable(false)).unwrap();
         controls.set(AwbEnable(false)).unwrap();
         controls.set(ExposureTime(exp_duration_micros as i32)).unwrap();
         controls.set(AnalogueGain(Self::cam_gain(
