@@ -4,8 +4,10 @@
 use canonical_error::{CanonicalError, failed_precondition_error, unimplemented_error};
 
 use async_trait::async_trait;
+
 use image::GrayImage;
 use log::{debug, info, warn};
+use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -384,8 +386,8 @@ impl RpiCamera {
         };
 
         let mut discard_image_count = 0;
-
         let mgr = CameraManager::new().unwrap();
+
         // Setting AeEnable(false) in setup_camera_request causes the libcamera C
         // implementation to log spurious warnings. I was unable to set the log
         // level to Error, so just turn off libcamera's logging for now.
@@ -439,6 +441,10 @@ impl RpiCamera {
         }
         // Enqueue all requests to the camera.
         active_cam.start(None).unwrap();
+        if state.lock().unwrap().model == "imx290" {
+            // This needs to be done after starting the camera.
+            Self::set_hcg_mode(true).unwrap();
+        }
         for req in reqs {
             active_cam.queue_request(req).unwrap();
         }
@@ -601,6 +607,78 @@ impl RpiCamera {
             }));
         }
     }
+
+    // Function to enable high conversion gain, relevant for IMX462.
+    fn set_hcg_mode(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
+        if !Self::ensure_i2c_access() {
+            // We've logged a warning.
+            return Ok(());
+        }
+        let bus = Self::find_imx290_bus()?;
+        let value = if enable { "0x11" } else { "0x01" };
+        let output = Command::new("i2ctransfer")
+            .args(&["-f", "-y", &bus.to_string(), "w3@0x1a", "0x30", "0x09", value])
+            .output()?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Failed to set HCG: {}", error).into());
+        }
+        log::info!("HCG mode set to: {}", enable);
+        Ok(())
+    }
+
+    fn ensure_i2c_access() -> bool {
+        // Test if we can access I2C.
+        let test_result = Command::new("i2cdetect")
+            .args(&["-y", "1"])
+            .output();
+        match test_result {
+            Ok(output) if output.status.success() => true,
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("Permission denied") {
+                    log::warn!(
+                        "I2C access denied. Please ensure user {} is in group i2c",
+                        std::env::var("USER").unwrap_or_else(|_| "$USER".to_string())
+                    );
+                } else {
+                    log::warn!("I2C error: {}", stderr);
+                }
+                false
+            },
+            Err(e) => {
+                log::warn!("Failed to run i2cdetect: {}", e);
+                false
+            }
+        }
+    }
+
+    fn find_imx290_bus() -> Result<u8, Box<dyn std::error::Error>> {
+        // Common I2C buses to check (in order of likelihood).
+        let candidate_buses = [11, 1, 0, 10, 12, 13, 14, 15];
+        for &bus in &candidate_buses {
+            if Self::test_imx290_on_bus(bus)? {
+                log::info!("Found IMX290 on I2C bus {}", bus);
+                return Ok(bus);
+            }
+        }
+        Err("IMX290 sensor not found on any I2C bus".into())
+    }
+
+    fn test_imx290_on_bus(bus: u8) -> Result<bool, Box<dyn std::error::Error>> {
+        // Try to read a known register (0x3009) from IMX290.
+        let output = Command::new("i2ctransfer")
+            .args(&["-f", "-y", &bus.to_string(), "w2@0x1a", "0x30", "0x09", "r1"])
+            .output()?;
+        // If command succeeds and returns data, sensor is present.
+        if output.status.success() && !output.stdout.is_empty() {
+            let response = String::from_utf8_lossy(&output.stdout);
+            log::debug!("Bus {} response: {}", bus, response.trim());
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
 }  // impl RpiCamera.
 
 /// We arrange to call stop() when RpiCamera object goes out of scope.

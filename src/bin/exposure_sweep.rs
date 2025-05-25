@@ -26,6 +26,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
+    // If any thread panics, bail out.
+    std::panic::set_hook(Box::new(|panic_info| {
+        eprintln!("Thread panicked: {}", panic_info);
+        std::process::exit(1);
+    }));
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
@@ -39,9 +44,9 @@ async fn main() {
     let roi = Rect::at(width / 2, height / 2).of_size(30, 30);
 
     let mut frame_id = -1;
-    for gain in [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100] {
+    for gain in [0, 20, 50, 100] {
         camera.set_gain(Gain::new(gain)).unwrap();
-        for exp_ms in [10, 20, 50, 100] {
+        for exp_ms in [1, 2, 5, 10] {
             camera.set_exposure_duration(Duration::from_micros(
                 exp_ms as u64 * 1000)).unwrap();
             let (captured_image, new_frame_id) =
