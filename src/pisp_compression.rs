@@ -91,82 +91,44 @@ pub fn uncompress(stride: usize,
                   image_data: &mut Vec<u8>,
                   width: usize,
                   height: usize,
-                  inverted: bool,
-                  correct_invert: bool,
 		  pisp_compression_mode: i32) {
     if pisp_compression_mode != COMPRESS_MODE {
 	// Although we do have the logic for modes 2 and 3.
 	panic!("Only PiSP mode 1 is expected");
     }
-
-    let inverted = inverted ^ correct_invert;
     for row in 0..height {
-        let out_row = if inverted { height - row - 1 } else { row };
-
         let buf_row_start = (row * stride) as usize;
         let buf_row_end = buf_row_start + width as usize;
-        let pix_row_start = (out_row * width) as usize;
+        let pix_row_start = (row * width) as usize;
         let pix_row_end = pix_row_start + width as usize;
-        if inverted {
-            for (buf_chunk, pix_chunk)
-                in buf_data[buf_row_start..buf_row_end].chunks_exact(8).zip(
-                    image_data[pix_row_start..pix_row_end].rchunks_exact_mut(8))
-            {
-		if pisp_compression_mode & 1 != 0 {
-		    let mut w0 = 0u32;
-                    let mut w1 = 0u32;
-                    for b in 0..4 {
-			w0 |= (buf_chunk[b] as u32) << (b * 8);
-                    }
-                    for b in 0..4 {
-			w1 |= (buf_chunk[4 + b] as u32) << (b * 8);
-                    }
-                    let r0 = sub_block_function(w0);
-		    pix_chunk[7] = (postprocess(r0[0]) >> 8) as u8;
-		    pix_chunk[5] = (postprocess(r0[1]) >> 8) as u8;
-		    pix_chunk[3] = (postprocess(r0[2]) >> 8) as u8;
-		    pix_chunk[1] = (postprocess(r0[3]) >> 8) as u8;
-                    let r1 = sub_block_function(w1);
-		    pix_chunk[6] = (postprocess(r1[0]) >> 8) as u8;
-		    pix_chunk[4] = (postprocess(r1[1]) >> 8) as u8;
-		    pix_chunk[2] = (postprocess(r1[2]) >> 8) as u8;
-		    pix_chunk[0] = (postprocess(r1[3]) >> 8) as u8;
-		} else {
-		    for i in 0..8 {
-			pix_chunk[7 - i] = (postprocess((buf_chunk[i] as u16) << 8) >> 8) as u8;
-		    }
+        for (buf_chunk, pix_chunk)
+            in buf_data[buf_row_start..buf_row_end].chunks_exact(8).zip(
+                image_data[pix_row_start..pix_row_end].chunks_exact_mut(8))
+        {
+	    if pisp_compression_mode & 1 != 0 {
+		let mut w0 = 0u32;
+                let mut w1 = 0u32;
+                for b in 0..4 {
+		    w0 |= (buf_chunk[b] as u32) << (b * 8);
+                }
+                for b in 0..4 {
+		    w1 |= (buf_chunk[4 + b] as u32) << (b * 8);
+                }
+                let r0 = sub_block_function(w0);
+		pix_chunk[0] = (postprocess(r0[0]) >> 8) as u8;
+		pix_chunk[2] = (postprocess(r0[1]) >> 8) as u8;
+		pix_chunk[4] = (postprocess(r0[2]) >> 8) as u8;
+		pix_chunk[6] = (postprocess(r0[3]) >> 8) as u8;
+                let r1 = sub_block_function(w1);
+		pix_chunk[1] = (postprocess(r1[0]) >> 8) as u8;
+		pix_chunk[3] = (postprocess(r1[1]) >> 8) as u8;
+		pix_chunk[5] = (postprocess(r1[2]) >> 8) as u8;
+		pix_chunk[7] = (postprocess(r1[3]) >> 8) as u8;
+	    } else {
+		for i in 0..8 {
+		    pix_chunk[i] = (postprocess((buf_chunk[i] as u16) << 8) >> 8) as u8;
 		}
-            }
-        } else {
-            for (buf_chunk, pix_chunk)
-                in buf_data[buf_row_start..buf_row_end].chunks_exact(8).zip(
-                    image_data[pix_row_start..pix_row_end].chunks_exact_mut(8))
-            {
-		if pisp_compression_mode & 1 != 0 {
-		    let mut w0 = 0u32;
-                    let mut w1 = 0u32;
-                    for b in 0..4 {
-			w0 |= (buf_chunk[b] as u32) << (b * 8);
-                    }
-                    for b in 0..4 {
-			w1 |= (buf_chunk[4 + b] as u32) << (b * 8);
-                    }
-                    let r0 = sub_block_function(w0);
-		    pix_chunk[0] = (postprocess(r0[0]) >> 8) as u8;
-		    pix_chunk[2] = (postprocess(r0[1]) >> 8) as u8;
-		    pix_chunk[4] = (postprocess(r0[2]) >> 8) as u8;
-		    pix_chunk[6] = (postprocess(r0[3]) >> 8) as u8;
-                    let r1 = sub_block_function(w1);
-		    pix_chunk[1] = (postprocess(r1[0]) >> 8) as u8;
-		    pix_chunk[3] = (postprocess(r1[1]) >> 8) as u8;
-		    pix_chunk[5] = (postprocess(r1[2]) >> 8) as u8;
-		    pix_chunk[7] = (postprocess(r1[3]) >> 8) as u8;
-		} else {
-		    for i in 0..8 {
-			pix_chunk[i] = (postprocess((buf_chunk[i] as u16) << 8) >> 8) as u8;
-		    }
-		}
-            }
+	    }
         }
     }
 }

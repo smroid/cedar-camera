@@ -11,7 +11,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use canonical_error::{CanonicalError};
 use image::GrayImage;
-use image::imageops::rotate180;
 
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
                              Gain, Offset};
@@ -22,7 +21,6 @@ pub struct ImageCamera {
 
     offset: Offset,
     gain: Gain,
-    inverted: bool,
 
     // Zero means go fast as camera frames are available.
     update_interval: Duration,
@@ -39,7 +37,6 @@ impl ImageCamera {
                                  exposure_duration: Duration::from_millis(100),
                                  offset: Offset::new(3),
                                  gain: Gain::new(50),
-                                 inverted: false,
                                  update_interval: Duration::ZERO,
                                  most_recent_capture: None,
                                  frame_id: 0,
@@ -49,10 +46,7 @@ impl ImageCamera {
     }
 
     fn capture_image(&mut self) {
-        let mut image = self.image.deref().clone();
-        if self.inverted {
-            image = rotate180(&image);
-        }
+        let image = self.image.deref().clone();
         self.most_recent_capture = Some(CapturedImage {
             capture_params: CaptureParams {
                 exposure_duration: self.get_exposure_duration(),
@@ -111,14 +105,6 @@ impl AbstractCamera for ImageCamera {
     }
     fn get_offset(&self) -> Offset {
         self.offset
-    }
-
-    fn set_inverted(&mut self, inverted: bool) -> Result<(), CanonicalError> {
-        self.inverted = inverted;
-        Ok(())
-    }
-    fn get_inverted(&self) -> bool {
-        self.inverted
     }
 
     fn set_update_interval(&mut self, update_interval: Duration)

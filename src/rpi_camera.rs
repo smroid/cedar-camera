@@ -66,14 +66,6 @@ struct SharedState {
 
     is_packed: bool,
 
-    // Whether image should be inverted, according to set_inverted() API.
-    inverted: bool,
-
-    // We use the convention that the Rpi camera should produce an upright image
-    // when the module is rotated to have the connector at the bottom. Some modules
-    // are inverted (rot180) with respect to this, so we correct during readout.
-    correct_invert: bool,
-
     // Current camera settings as set via RpiCamera methods. Will be put into
     // effect when the current exposure finishes, influencing the following
     // exposures.
@@ -178,14 +170,6 @@ impl RpiCamera {
         };
         debug!("max_gain {}", max_gain);
 
-        // Unfortunately the libcamera API's Rotation property doesn't seem to correlate
-        // with our connector-oriented definition. Figure it out based on the model.
-        let correct_invert = match model.as_str() {
-            "imx296" => true,
-            _ => false,
-        };
-        debug!("correct_invert {}", correct_invert);
-
         let mut cam = RpiCamera{
             sensor_width: width as f32 * pixel_size_nanometers.width as f32 / 1000000.0,
             sensor_height: height as f32 * pixel_size_nanometers.height as f32 / 1000000.0,
@@ -196,8 +180,6 @@ impl RpiCamera {
                 width, height,
 		pisp_compressed, pisp_compression_mode,
                 is_10_bit, is_12_bit, is_packed,
-                inverted: false,
-                correct_invert,
                 camera_settings: CaptureParams::new(),
                 setting_changed: false,
                 update_interval: Duration::ZERO,
@@ -269,54 +251,31 @@ impl RpiCamera {
                        image_data: &mut Vec<u8>,
                        width: usize,
                        height: usize,
-                       inverted: bool,
-                       correct_invert: bool,
                        is_10_bit: bool,
                        is_12_bit: bool,
                        is_packed: bool) {
-        let inverted = inverted ^ correct_invert;
         if is_10_bit {
             if is_packed {
                 // Convert from packed 10 bit to 8 bit.
                 for row in 0..height {
-                    let out_row = if inverted { height - row - 1 } else { row };
-
                     let buf_row_start = (row * stride) as usize;
                     let buf_row_end = buf_row_start + (width*5/4) as usize;
-                    let pix_row_start = (out_row * width) as usize;
+                    let pix_row_start = (row * width) as usize;
                     let pix_row_end = pix_row_start + width as usize;
-                    if inverted {
-                        for (buf_chunk, pix_chunk)
-                            in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
-                                image_data[pix_row_start..pix_row_end].rchunks_exact_mut(4))
-                        {
-                            // Keep upper 8 bits; discard 2 lsb.
-                            let pix0 = buf_chunk[0];
-                            let pix1 = buf_chunk[1];
-                            let pix2 = buf_chunk[2];
-                            let pix3 = buf_chunk[3];
-                            // pix4 has the lsb values, which we discard.
-                            pix_chunk[3] = pix0;
-                            pix_chunk[2] = pix1;
-                            pix_chunk[1] = pix2;
-                            pix_chunk[0] = pix3;
-                        }
-                    } else {
-                        for (buf_chunk, pix_chunk)
-                            in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
-                                image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
-                        {
-                            // Keep upper 8 bits; discard 2 lsb.
-                            let pix0 = buf_chunk[0];
-                            let pix1 = buf_chunk[1];
-                            let pix2 = buf_chunk[2];
-                            let pix3 = buf_chunk[3];
-                            // pix4 has the lsb values, which we discard.
-                            pix_chunk[0] = pix0;
-                            pix_chunk[1] = pix1;
-                            pix_chunk[2] = pix2;
-                            pix_chunk[3] = pix3;
-                        }
+                    for (buf_chunk, pix_chunk)
+                        in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
+                            image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
+                    {
+                        // Keep upper 8 bits; discard 2 lsb.
+                        let pix0 = buf_chunk[0];
+                        let pix1 = buf_chunk[1];
+                        let pix2 = buf_chunk[2];
+                        let pix3 = buf_chunk[3];
+                        // pix4 has the lsb values, which we discard.
+                        pix_chunk[0] = pix0;
+                        pix_chunk[1] = pix1;
+                        pix_chunk[2] = pix2;
+                        pix_chunk[3] = pix3;
                     }
                 }
             } else {
@@ -326,36 +285,20 @@ impl RpiCamera {
             if is_packed {
                 // Convert from packed 12 bit to 8 bit.
                 for row in 0..height {
-                    let out_row = if inverted { height - row - 1 } else { row };
-
                     let buf_row_start = (row * stride) as usize;
                     let buf_row_end = buf_row_start + (width*3/2) as usize;
-                    let pix_row_start = (out_row * width) as usize;
+                    let pix_row_start = (row * width) as usize;
                     let pix_row_end = pix_row_start + width as usize;
-                    if inverted {
-                        for (buf_chunk, pix_pair)
-                            in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
-                                image_data[pix_row_start..pix_row_end].rchunks_exact_mut(2))
-                        {
-                            // Keep upper 8 bits; discard 4 lsb.
-                            let pix0 = buf_chunk[0];
-                            let pix1 = buf_chunk[1];
-                            // pix2 has the lsb values, which we discard.
-                            pix_pair[1] = pix0;
-                            pix_pair[0] = pix1;
-                        }
-                    } else {
-                        for (buf_chunk, pix_pair)
-                            in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
-                                image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
-                        {
-                            // Keep upper 8 bits; discard 4 lsb.
-                            let pix0 = buf_chunk[0];
-                            let pix1 = buf_chunk[1];
-                            // pix2 has the lsb values, which we discard.
-                            pix_pair[0] = pix0;
-                            pix_pair[1] = pix1;
-                        }
+                    for (buf_chunk, pix_pair)
+                        in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
+                            image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
+                    {
+                        // Keep upper 8 bits; discard 4 lsb.
+                        let pix0 = buf_chunk[0];
+                        let pix1 = buf_chunk[1];
+                        // pix2 has the lsb values, which we discard.
+                        pix_pair[0] = pix0;
+                        pix_pair[1] = pix1;
                     }
                 }
             } else {
@@ -491,8 +434,6 @@ impl RpiCamera {
             let mut do_queue = false;
             let width;
             let height;
-            let inverted;
-            let correct_invert;
 	    let pisp_compressed;
 	    let pisp_compression_mode;
             let is_10_bit;
@@ -503,8 +444,6 @@ impl RpiCamera {
                 let mut locked_state = state.lock().unwrap();
                 width = locked_state.width;
                 height = locked_state.height;
-                inverted = locked_state.inverted;
-                correct_invert = locked_state.correct_invert;
 		pisp_compressed = locked_state.pisp_compressed;
 		pisp_compression_mode = locked_state.pisp_compression_mode;
                 is_10_bit = locked_state.is_10_bit;
@@ -545,12 +484,10 @@ impl RpiCamera {
 
 	    if pisp_compressed {
 		pisp_compression::uncompress(stride, &buf_data, &mut image_data,
-					     width, height, inverted, correct_invert,
-					     pisp_compression_mode);
+					     width, height, pisp_compression_mode);
 	    } else {
 		Self::convert_to_8bit(stride, &buf_data, &mut image_data,
-                                      width, height, inverted, correct_invert,
-                                      is_10_bit, is_12_bit, is_packed);
+                                      width, height, is_10_bit, is_12_bit, is_packed);
 	    }
             let image = GrayImage::from_raw(
                 width as u32, height as u32, image_data).unwrap();
@@ -746,19 +683,6 @@ impl AbstractCamera for RpiCamera {
     }
     fn get_offset(&self) -> Offset {
         Offset::new(0)
-    }
-
-    fn set_inverted(&mut self, inverted: bool) -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
-        if locked_state.inverted != inverted {
-            RpiCamera::changed_setting(&mut locked_state);
-        }
-        locked_state.inverted = inverted;
-        Ok(())
-    }
-    fn get_inverted(&self) -> bool {
-        let locked_state = self.state.lock().unwrap();
-        locked_state.inverted
     }
 
     fn set_update_interval(&mut self, update_interval: Duration)
