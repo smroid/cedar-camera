@@ -44,7 +44,7 @@ async fn main() {
     let roi = Rect::at(width / 2, height / 2).of_size(30, 30);
 
     let mut frame_id = -1;
-    for gain in [0, 20, 50, 100] {
+    for gain in [0, 1, 2, 5, 10, 20, 50, 100] {
         camera.set_gain(Gain::new(gain)).unwrap();
         for exp_ms in [1, 2, 5, 10] {
             camera.set_exposure_duration(Duration::from_micros(
