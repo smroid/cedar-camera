@@ -166,6 +166,7 @@ impl RpiCamera {
             "imx477" => 22,
             "imx290" => 31,  // AKA imx462.
             "imx296" => 15,
+            "ov5647" => 63,
             _ => 63,
         };
         debug!("max_gain {}", max_gain);
