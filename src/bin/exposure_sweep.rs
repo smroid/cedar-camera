@@ -49,11 +49,24 @@ async fn main() {
         for exp_ms in [1, 2, 5, 10] {
             camera.set_exposure_duration(Duration::from_micros(
                 exp_ms as u64 * 1000)).unwrap();
-            let (captured_image, new_frame_id) =
-                camera.capture_image(Some(frame_id)).await.unwrap();
-            frame_id = new_frame_id;
+            let image;
+            let mut captured_image;
+            loop {
+                (captured_image, frame_id) =
+                    camera.capture_image(Some(frame_id)).await.unwrap();
+                // Wait for camera's image to accurately reflect the camera's
+                // settings.
+                if captured_image.params_accurate {
+                    image = &captured_image.image;
+                    break;
+                }
+            }
 
-            let image = &captured_image.image;
+            // let (captured_image, new_frame_id) =
+            //     camera.capture_image(Some(frame_id)).await.unwrap();
+            // frame_id = new_frame_id;
+
+            // let image = &captured_image.image;
             let (background, noise);
             if camera.is_color() {
                 // Bayer grid will exhibit high noise. Do a 2x2 downsample which is

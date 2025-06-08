@@ -63,9 +63,6 @@ impl Offset {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub struct Celsius(pub i32);
-
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct CaptureParams {
     pub exposure_duration: Duration,
@@ -87,6 +84,15 @@ pub struct CapturedImage {
     /// The parameters that were in effect when the image capture
     /// occurred.
     pub capture_params: CaptureParams,
+
+    /// After a change to gain, exposure, or offset, the next few CapturedImages
+    /// will have the new `capture_params` but the `image` might still reflect
+    /// the previous parameters. This field identifies when `image` is
+    /// consistent with `capture_params`. Most consumers of `image` don't care,
+    /// but the auto-exposure and calibration algorithms need to be mindful not
+    /// to use `image` data to influence the exposure when `params_accurate` is
+    /// false.
+    pub params_accurate: bool,
 
     /// 8 bit pixel data stored in row major order. For color cameras, the raw
     /// values of the photosites are returned (linearly scaled to 8 bits); no
@@ -160,15 +166,6 @@ pub trait AbstractCamera {
     /// yet a current image) if `prev_frame_id` is omitted. If `prev_frame_id`
     /// is supplied, the call blocks while the current image has the same id
     /// value.
-    /// The wait time is related to the exposure duration but can be shorter or
-    /// longer depending on the implementation of this camera type:
-    /// Shorter: If the implementation runs the camera in video mode, a call to
-    ///     capture_image() can return immediately, returning the most recently
-    ///     completed frame, or when the next frame is ready (if `prev_frame_id`
-    ///     is the same as the current frame).
-    /// Longer: The first call to capture_image(), or the next call to
-    ///     capture_image() after changing certain settings, can incur significant
-    ///     delay beyond the exposure duration.
     /// Returns: the captured image along with its frame_id value.
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError>;

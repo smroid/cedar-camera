@@ -146,9 +146,9 @@ impl ASICamera {
     }  // new().
 
     // This function is called whenever a camera setting is changed. The most
-    // recently captured image is invalidated, and the next call to capture_image()
-    // will wait for the setting change to be reflected in the captured image
-    // stream.
+    // recently captured image is invalidated, and `params_accurate` in
+    // subsequent captured images will be false until the setting change is
+    // reflected in the captured image stream.
     fn changed_setting(locked_state: &mut MutexGuard<SharedState>) {
         locked_state.setting_changed = true;
         locked_state.most_recent_capture = None;
@@ -167,10 +167,11 @@ impl ASICamera {
         // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
         // started. Not only that, but ASI cameras seem to have some kind of
-        // internal pipeline, such that a few images need to be discarded after
-        // a setting change.
+        // internal pipeline, such that a few images need to be marked dirty
+        // after a setting change.
         let pipeline_depth = 2;  // TODO: does this differ across ASI models?
-        let mut discard_image_count = 0;
+        // How many captured images we will mark with params_accurate=false.
+        let mut mark_image_count = 0;
         // Keep track of when we grabbed a frame.
         let mut last_frame_time: Option<Instant> = None;
         loop {
@@ -281,24 +282,24 @@ impl ASICamera {
             if update_interval == Duration::ZERO {
                 state.lock().unwrap().eta = Some(Instant::now() + exp_duration);
             }
-            if discard_image_count > 0 {
-                discard_image_count -= 1;
-            } else {
-                let mut locked_state = state.lock().unwrap();
-                if locked_state.setting_changed {
-                    discard_image_count = pipeline_depth;
-                    locked_state.setting_changed = false;
-                } else {
-                    let image = GrayImage::from_raw(width as u32, height as u32,
-                                                    image_data).unwrap();
-                    locked_state.most_recent_capture = Some(CapturedImage {
-                        capture_params: locked_state.camera_settings,
-                        image: Arc::new(image),
-                        readout_time: SystemTime::now(),
-                    });
-                    locked_state.frame_id += 1;
-                }
+
+            let mut locked_state = state.lock().unwrap();
+            if locked_state.setting_changed {
+                mark_image_count = pipeline_depth;
+                locked_state.setting_changed = false;
             }
+            let image = GrayImage::from_raw(width as u32, height as u32,
+                                            image_data).unwrap();
+            locked_state.most_recent_capture = Some(CapturedImage {
+                capture_params: locked_state.camera_settings,
+                params_accurate: mark_image_count == 0,
+                image: Arc::new(image),
+                readout_time: SystemTime::now(),
+            });
+            if !locked_state.setting_changed && mark_image_count > 0 {
+                mark_image_count -= 1;
+            }
+            locked_state.frame_id += 1;
         }  // loop.
     }  // worker().
 

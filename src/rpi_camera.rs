@@ -317,7 +317,8 @@ impl RpiCamera {
 
         // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
-        // started. We need to discard a number of images after a setting change.
+        // started. We need to mark dirty a number of images after a setting
+        // change.
         let pipeline_depth = match state.lock().unwrap().model.as_str() {
             // These values are determined empirically by using the exposure_sweep
             // test program.
@@ -329,7 +330,8 @@ impl RpiCamera {
             _ => 5,
         };
 
-        let mut discard_image_count = 0;
+        // How many captured images we will mark with params_accurate=false.
+        let mut mark_image_count = 0;
         let mgr = CameraManager::new().unwrap();
 
         // Setting AeEnable(false) in setup_camera_request causes the libcamera C
@@ -432,7 +434,6 @@ impl RpiCamera {
                 }
             };
             last_frame_time = Some(Instant::now());
-            let mut do_queue = false;
             let width;
             let height;
 	    let pisp_compressed;
@@ -451,24 +452,12 @@ impl RpiCamera {
                 is_12_bit = locked_state.is_12_bit;
                 is_packed = locked_state.is_packed;
                 if locked_state.setting_changed {
-                    discard_image_count = pipeline_depth;
+                    mark_image_count = pipeline_depth;
                     locked_state.setting_changed = false;
-                    req.reuse(ReuseFlag::REUSE_BUFFERS);
-                    let controls = req.controls_mut();
-                    Self::setup_camera_request(controls, &locked_state);
-                    do_queue = true;
-                } else if discard_image_count > 0 {
-                    discard_image_count -= 1;
-                    req.reuse(ReuseFlag::REUSE_BUFFERS);
-                    let controls = req.controls_mut();
-                    Self::setup_camera_request(controls, &locked_state);
-                    do_queue = true;
+                } else if mark_image_count > 0 {
+                    mark_image_count -= 1;
                 }
                 exp_duration = locked_state.camera_settings.exposure_duration;
-            }
-            if do_queue {
-                active_cam.queue_request(req).unwrap();
-                continue;
             }
 
             // Grab the image.
@@ -507,6 +496,7 @@ impl RpiCamera {
             if !locked_state.setting_changed {
                 locked_state.most_recent_capture = Some(CapturedImage {
                     capture_params: locked_state.camera_settings,
+                    params_accurate: mark_image_count == 0,
                     image: Arc::new(image),
                     readout_time: SystemTime::now(),
                 });

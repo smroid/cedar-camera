@@ -53,6 +53,7 @@ impl ImageCamera {
                 gain: self.get_gain(),
                 offset: self.get_offset(),
             },
+            params_accurate: true,
             image: Arc::new(image),
             readout_time: SystemTime::now(),
         });
