@@ -406,8 +406,15 @@ impl RpiCamera {
                 if locked_state.stop_request {
                     info!("Stopping capture");
                     if let Err(e) = active_cam.stop() {
-                        warn!("Error stopping capture: {}", &e.to_string());
+                        warn!("Error stopping capture: {:?}", e);
                     }
+                    // Drain remaining completed requests to prevent resource
+                    // leaks.
+                    while let Ok(_req) = rx.try_recv() {
+                        debug!("Drained completed request during shutdown");
+                        // Request will be dropped here, releasing its buffer
+                    }
+
                     locked_state.stop_request = false;
                     return;  // Exit thread.
                 }
@@ -428,10 +435,14 @@ impl RpiCamera {
             // Time to grab a frame.
             let mut req = match rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(req) => req,
-                Err(e) => {
-                    warn!("Camera request failed: {:?}", e);
-                    continue;
-                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    warn!("Camera request timeout - checking for stop request");
+                    continue;  // Check stop_request in next loop iteration.
+                },
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    warn!("Camera request channel disconnected");
+                    break;  // Exit loop and cleanup.
+                },
             };
             last_frame_time = Some(Instant::now());
             let width;
@@ -451,13 +462,13 @@ impl RpiCamera {
                 is_10_bit = locked_state.is_10_bit;
                 is_12_bit = locked_state.is_12_bit;
                 is_packed = locked_state.is_packed;
+                exp_duration = locked_state.camera_settings.exposure_duration;
                 if locked_state.setting_changed {
                     mark_image_count = pipeline_depth;
                     locked_state.setting_changed = false;
                 } else if mark_image_count > 0 {
                     mark_image_count -= 1;
                 }
-                exp_duration = locked_state.camera_settings.exposure_duration;
             }
 
             // Grab the image.
@@ -487,12 +498,13 @@ impl RpiCamera {
             let controls = req.controls_mut();
             let mut locked_state = state.lock().unwrap();
             Self::setup_camera_request(controls, &locked_state);
-            active_cam.queue_request(req).unwrap();
-
+            if let Err(e) = active_cam.queue_request(req) {
+                warn!("Failed to re-queue request: {:?}", e);
+                break; // Exit loop on queue failure
+            }
             if update_interval == Duration::ZERO {
                 locked_state.eta = Some(Instant::now() + exp_duration);
             }
-
             if !locked_state.setting_changed {
                 locked_state.most_recent_capture = Some(CapturedImage {
                     capture_params: locked_state.camera_settings,
@@ -503,6 +515,12 @@ impl RpiCamera {
                 locked_state.frame_id += 1;
             }
         }  // loop.
+        // Fallback cleanup if loop exits unexpectedly.
+        warn!("Worker loop exited unexpectedly, performing cleanup");
+        if let Err(e) = active_cam.stop() {
+            warn!("Error in fallback camera stop: {:?}", e);
+        }
+        while let Ok(_) = rx.try_recv() {} // Drain channel
     }  // worker().
 
     // Translate our 0..100 into the camera min/max range for analog gain.
@@ -575,7 +593,7 @@ impl RpiCamera {
                 false
             },
             Err(e) => {
-                log::warn!("Failed to run i2cdetect: {}", e);
+                log::warn!("Failed to run i2cdetect: {:?}", e);
                 false
             }
         }
