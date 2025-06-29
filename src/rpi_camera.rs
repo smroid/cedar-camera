@@ -149,12 +149,12 @@ impl RpiCamera {
         let is_12_bit = pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
         let is_10_bit = pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
         let is_packed = pixel_format.ends_with("_CSI2P");
-	let is_color;
-	if pisp_compressed {
-	    is_color = !pixel_format.contains("MONO");
-	} else {
-            is_color = pixel_format.starts_with("S");
-	}
+	let is_color =
+	    if pisp_compressed {
+	        !pixel_format.contains("MONO")
+	    } else {
+                pixel_format.starts_with("S")
+	    };
 
         // Annoyingly, different Rpi cameras have different analog gain values.
         let min_gain = match model.as_str() {
@@ -249,7 +249,7 @@ impl RpiCamera {
     //   binning process.
     fn convert_to_8bit(stride: usize,
                        buf_data: &[u8],
-                       image_data: &mut Vec<u8>,
+                       image_data: &mut [u8],
                        width: usize,
                        height: usize,
                        is_10_bit: bool,
@@ -259,10 +259,10 @@ impl RpiCamera {
             if is_packed {
                 // Convert from packed 10 bit to 8 bit.
                 for row in 0..height {
-                    let buf_row_start = (row * stride) as usize;
-                    let buf_row_end = buf_row_start + (width*5/4) as usize;
-                    let pix_row_start = (row * width) as usize;
-                    let pix_row_end = pix_row_start + width as usize;
+                    let buf_row_start = row * stride;
+                    let buf_row_end = buf_row_start + width*5/4;
+                    let pix_row_start = row * width;
+                    let pix_row_end = pix_row_start + width;
                     for (buf_chunk, pix_chunk)
                         in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
                             image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
@@ -286,10 +286,10 @@ impl RpiCamera {
             if is_packed {
                 // Convert from packed 12 bit to 8 bit.
                 for row in 0..height {
-                    let buf_row_start = (row * stride) as usize;
-                    let buf_row_end = buf_row_start + (width*3/2) as usize;
-                    let pix_row_start = (row * width) as usize;
-                    let pix_row_end = pix_row_start + width as usize;
+                    let buf_row_start = row * stride;
+                    let buf_row_end = buf_row_start + width*3/2;
+                    let pix_row_start = row * width;
+                    let pix_row_end = pix_row_start + width;
                     for (buf_chunk, pix_pair)
                         in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
                             image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
@@ -343,11 +343,8 @@ impl RpiCamera {
         let mut active_cam = cam.acquire().expect("Unable to acquire camera");
 
         let mut cfgs = cam.generate_configuration(&[StreamRole::Raw]).unwrap();
-        match cfgs.validate() {
-            CameraConfigurationStatus::Invalid => {
-                panic!("Camera configuration was rejected: {:#?}", cfgs);
-            },
-            _ => ()
+        if let CameraConfigurationStatus::Invalid = cfgs.validate() {
+            panic!("Camera configuration was rejected: {:#?}", cfgs);
         }
         active_cam.configure(&mut cfgs).expect("Unable to configure camera");
         let cfg = cfgs.get(0).unwrap();
@@ -476,18 +473,18 @@ impl RpiCamera {
                 req.buffer(&stream).unwrap();
             // Raw format has only one data plane containing bayer or mono data.
             let planes = framebuffer.data();
-            let buf_data = planes.get(0).unwrap();
+            let buf_data = planes.first().unwrap();
 
             // Allocate uninitialized storage to receive the converted image data.
             let num_pixels = width * height;
-            let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
-            unsafe { image_data.set_len(num_pixels as usize) }
+            let mut image_data = Vec::<u8>::with_capacity(num_pixels);
+            unsafe { image_data.set_len(num_pixels) }
 
 	    if pisp_compressed {
-		pisp_compression::uncompress(stride, &buf_data, &mut image_data,
+		pisp_compression::uncompress(stride, buf_data, &mut image_data,
 					     width, height, pisp_compression_mode);
 	    } else {
-		Self::convert_to_8bit(stride, &buf_data, &mut image_data,
+		Self::convert_to_8bit(stride, buf_data, &mut image_data,
                                       width, height, is_10_bit, is_12_bit, is_packed);
 	    }
             let image = GrayImage::from_raw(
@@ -520,7 +517,7 @@ impl RpiCamera {
         if let Err(e) = active_cam.stop() {
             warn!("Error in fallback camera stop: {:?}", e);
         }
-        while let Ok(_) = rx.try_recv() {} // Drain channel
+        while rx.try_recv().is_ok() {}  // Drain channel.
     }  // worker().
 
     // Translate our 0..100 into the camera min/max range for analog gain.
@@ -563,7 +560,7 @@ impl RpiCamera {
         let bus = Self::find_imx290_bus()?;
         let value = if enable { "0x11" } else { "0x01" };
         let output = Command::new("i2ctransfer")
-            .args(&["-f", "-y", &bus.to_string(), "w3@0x1a", "0x30", "0x09", value])
+            .args(["-f", "-y", &bus.to_string(), "w3@0x1a", "0x30", "0x09", value])
             .output()?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
@@ -576,7 +573,7 @@ impl RpiCamera {
     fn ensure_i2c_access() -> bool {
         // Test if we can access I2C.
         let test_result = Command::new("i2cdetect")
-            .args(&["-y", "1"])
+            .args(["-y", "1"])
             .output();
         match test_result {
             Ok(output) if output.status.success() => true,
@@ -614,7 +611,7 @@ impl RpiCamera {
     fn test_imx290_on_bus(bus: u8) -> Result<bool, Box<dyn std::error::Error>> {
         // Try to read a known register (0x3009) from IMX290.
         let output = Command::new("i2ctransfer")
-            .args(&["-f", "-y", &bus.to_string(), "w2@0x1a", "0x30", "0x09", "r1"])
+            .args(["-f", "-y", &bus.to_string(), "w2@0x1a", "0x30", "0x09", "r1"])
             .output()?;
         // If command succeeds and returns data, sensor is present.
         if output.status.success() && !output.stdout.is_empty() {
@@ -738,18 +735,16 @@ impl AbstractCamera for RpiCamera {
         // Get the most recently posted image; return none if there is none yet
         // or the currently posted image's frame id is the same as
         // `prev_frame_id`.
-        loop {
-            let locked_state = self.state.lock().unwrap();
-            if locked_state.most_recent_capture.is_some() &&
-                (prev_frame_id.is_none() ||
-                 prev_frame_id.unwrap() != locked_state.frame_id)
-            {
-                // Don't consume it, other clients may want it.
-                return Ok(Some((locked_state.most_recent_capture.clone().unwrap(),
-                                locked_state.frame_id)));
-            }
-            return Ok(None);
+        let locked_state = self.state.lock().unwrap();
+        if locked_state.most_recent_capture.is_some() &&
+            (prev_frame_id.is_none() ||
+             prev_frame_id.unwrap() != locked_state.frame_id)
+        {
+            // Don't consume it, other clients may want it.
+            return Ok(Some((locked_state.most_recent_capture.clone().unwrap(),
+                            locked_state.frame_id)));
         }
+        Ok(None)
     }
 
     fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {

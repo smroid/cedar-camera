@@ -26,7 +26,7 @@ fn postprocess(mut a: u16) -> u16 {
         } else if a < 0x6000 {
             a = (a - 0x2000) >> 1;
         } else if a < 0xC000 {
-            a = a - 0x4000;
+            a -= 0x4000;
         } else {
             a = 2 * (a - 0x8000);
         }
@@ -88,7 +88,7 @@ fn sub_block_function(w: u32) -> [u16; 4] {
 // Convert PiSP compressed raw to 16 bits, and then retain only the upper 8 bits.
 pub fn uncompress(stride: usize,
 		  buf_data: &[u8],
-                  image_data: &mut Vec<u8>,
+                  image_data: &mut [u8],
                   width: usize,
                   height: usize,
 		  pisp_compression_mode: i32) {
@@ -97,10 +97,10 @@ pub fn uncompress(stride: usize,
 	panic!("Only PiSP mode 1 is expected");
     }
     for row in 0..height {
-        let buf_row_start = (row * stride) as usize;
-        let buf_row_end = buf_row_start + width as usize;
-        let pix_row_start = (row * width) as usize;
-        let pix_row_end = pix_row_start + width as usize;
+        let buf_row_start = row * stride;
+        let buf_row_end = buf_row_start + width;
+        let pix_row_start = row * width;
+        let pix_row_end = pix_row_start + width;
         for (buf_chunk, pix_chunk)
             in buf_data[buf_row_start..buf_row_end].chunks_exact(8).zip(
                 image_data[pix_row_start..pix_row_end].chunks_exact_mut(8))

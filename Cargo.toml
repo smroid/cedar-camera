@@ -20,3 +20,6 @@ futures = "0.3.30"
 libcamera = { version = "0.3.0", path = "./libcamera-rs/libcamera" }
 imageproc = "0.25.0"
 fast_image_resize = "4.0.0"
+
+[lints.clippy]
+await_holding_lock = "warn"

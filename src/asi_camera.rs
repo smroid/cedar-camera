@@ -271,8 +271,8 @@ impl ASICamera {
 
             // Allocate uninitialized storage to receive the image data.
             let num_pixels:usize = width * height;
-            let mut image_data = Vec::<u8>::with_capacity(num_pixels as usize);
-            unsafe { image_data.set_len(num_pixels as usize) }
+            let mut image_data = Vec::<u8>::with_capacity(num_pixels);
+            unsafe { image_data.set_len(num_pixels) }
             if let Err(e) = locked_sdk.get_video_data(
                 image_data.as_mut_ptr(), num_pixels as i64, /*wait_ms=*/2000) {
                 warn!("Error getting video data: {:?}; resetting and retrying", e);
@@ -372,27 +372,28 @@ impl AbstractCamera for ASICamera {
 
     fn sensor_size(&self) -> (f32, f32) {
         let (width, height) = self.dimensions();
-        let pixel_size_microns = self.info.PixelSize as f64;
+        let pixel_size_microns = self.info.PixelSize;
         ((width as f64 * pixel_size_microns / 1000.0) as f32,
          (height as f64 * pixel_size_microns / 1000.0) as f32)
     }
 
     fn optimal_gain(&self) -> Gain {
-        let optimal_gain;  // In SDK units.
+        // In SDK units.
+        let optimal_gain =
         // Use the optimal gain value for each ASI camera model.
-        match self.model().as_str() {
-            "ZWO ASI120MM Mini" => {
-                // Per graphs at
-                // https://astronomy-imaging-camera.com/product/asi120mm-mini-mono
-                // the read noise is low at this gain while the dynamic range
-                // is ~9, which is adequate for our use of 8-bit mode.
-                optimal_gain = 50;
-            },
-            _ => {
-                // Likely a decent fallback.
-                optimal_gain = self.default_gain;
-            }
-        }
+            match self.model().as_str() {
+                "ZWO ASI120MM Mini" => {
+                    // Per graphs at
+                    // https://astronomy-imaging-camera.com/product/asi120mm-mini-mono
+                    // the read noise is low at this gain while the dynamic range
+                    // is ~9, which is adequate for our use of 8-bit mode.
+                    50
+                },
+                _ => {
+                    // Likely a decent fallback.
+                    self.default_gain
+                }
+            };
         // Normalize optimal_gain according to our 0..100 range.
         let frac = (optimal_gain - self.min_gain) as f64 /
             (self.max_gain - self.min_gain) as f64;
@@ -483,18 +484,16 @@ impl AbstractCamera for ASICamera {
         // Get the most recently posted image; return None if there is none yet
         // or the currently posted image's frame id is the same as
         // `prev_frame_id`.
-        loop {
-            let locked_state = self.state.lock().unwrap();
-            if locked_state.most_recent_capture.is_some() &&
-                (prev_frame_id.is_none() ||
-                 prev_frame_id.unwrap() != locked_state.frame_id)
-            {
-                // Don't consume it, other clients may want it.
-                return Ok(Some((locked_state.most_recent_capture.clone().unwrap(),
-                                locked_state.frame_id)));
-            }
-            return Ok(None);
+        let locked_state = self.state.lock().unwrap();
+        if locked_state.most_recent_capture.is_some() &&
+            (prev_frame_id.is_none() ||
+             prev_frame_id.unwrap() != locked_state.frame_id)
+        {
+            // Don't consume it, other clients may want it.
+            return Ok(Some((locked_state.most_recent_capture.clone().unwrap(),
+                            locked_state.frame_id)));
         }
+        Ok(None)
     }
 
     fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
