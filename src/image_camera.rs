@@ -68,6 +68,8 @@ impl AbstractCamera for ImageCamera {
         "ImageCamera".to_string()
     }
 
+    fn model_detail(&self) -> Option<String> { None }
+
     fn dimensions(&self) -> (i32, i32) {
         (self.image.dimensions().0 as i32, self.image.dimensions().1 as i32)
     }

@@ -362,6 +362,8 @@ impl AbstractCamera for ASICamera {
         cstr.to_str().unwrap().to_owned()
     }
 
+    fn model_detail(&self) -> Option<String> { None }
+
     fn dimensions(&self) -> (i32, i32) {
         (self.info.MaxWidth as i32, self.info.MaxHeight as i32)
     }

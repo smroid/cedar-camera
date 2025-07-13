@@ -7,6 +7,7 @@ use async_trait::async_trait;
 
 use image::GrayImage;
 use log::{debug, info, warn};
+use std::fs;
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
@@ -47,6 +48,7 @@ pub struct RpiCamera {
 // State shared between capture thread and the RpiCamera methods.
 struct SharedState {
     model: String,
+    model_detail: Option<String>,  // dtoverlay params, if any.
 
     // Different models have different min/max analog gain.
     min_gain: i32,
@@ -133,6 +135,15 @@ impl RpiCamera {
         };
         let pixel_format = format!("{:?}", stream_config.get_pixel_format());
 
+        let model_detail = match Self::extract_dtoverlay_config(
+            "/boot/firmware/config.txt", model.as_str()) {
+            Ok(md) => md,
+            Err(e) => {
+                warn!("Error examining config.txt: {:?}", e);
+                None
+            },
+        };
+
 	// See https://git.libcamera.org/libcamera/libcamera.git/tree/src/libcamera/formats.cpp
 	let pisp_compressed = pixel_format.contains("PISP_COMP");
 	let pisp_compression_mode =
@@ -177,6 +188,7 @@ impl RpiCamera {
             is_color,
             state: Arc::new(Mutex::new(SharedState{
                 model: model.to_string(),
+                model_detail: model_detail,
                 min_gain, max_gain,
                 width, height,
 		pisp_compressed, pisp_compression_mode,
@@ -622,6 +634,27 @@ impl RpiCamera {
         Ok(false)
     }
 
+
+    fn extract_dtoverlay_config(file_path: &str, overlay_name: &str)
+                                -> Result<Option<String>, std::io::Error> {
+        let content = fs::read_to_string(file_path)?;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(config) = Self::parse_dtoverlay_line(trimmed, overlay_name) {
+                return Ok(Some(config));
+            }
+        }
+        Ok(None)
+    }
+
+    fn parse_dtoverlay_line(line: &str, overlay_name: &str) -> Option<String> {
+        let prefix = format!("dtoverlay={},", overlay_name);
+        if line.starts_with(&prefix) {
+            let config = &line[prefix.len()..];
+            return Some(config.to_string());
+        }
+        None
+    }
 }  // impl RpiCamera.
 
 /// We arrange to call stop() when RpiCamera object goes out of scope.
@@ -637,6 +670,10 @@ impl AbstractCamera for RpiCamera {
     fn model(&self) -> String {
         let locked_state = self.state.lock().unwrap();
         locked_state.model.clone()
+    }
+
+    fn model_detail(&self) -> Option<String> {
+        self.state.lock().unwrap().model_detail.clone()
     }
 
     fn dimensions(&self) -> (i32, i32) {

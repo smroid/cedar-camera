@@ -36,6 +36,7 @@ async fn main() {
     let args = Args::parse();
     let mut camera = select_camera(None, 0).unwrap();
     info!("camera: {}", camera.model());
+    info!("detail: {:?}", camera.model_detail());
     // Ignore cameras that can't set offset.
     let _ = camera.set_offset(Offset::new(3));
 

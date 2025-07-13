@@ -118,6 +118,11 @@ pub trait AbstractCamera {
     /// "ASI120mm mini", "imx477", etc.
     fn model(&self) -> String;
 
+    /// Additional information beyond model(). Usually absent; on Raspberry Pi
+    /// cameras this might include information from the dtoverlay entry for
+    /// the camera, e.g. "clock-frequency=74250000".
+    fn model_detail(&self) -> Option<String>;
+
     /// Returns the (width, height) pixel count of this camera type's sensor.
     fn dimensions(&self) -> (i32, i32);
 
