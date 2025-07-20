@@ -175,6 +175,7 @@ impl RpiCamera {
         debug!("min_gain {}", min_gain);
         let max_gain = match model.as_str() {
             "imx477" => 22,
+            "imx219" => 16,
             "imx290" => 31,  // AKA imx462.
             "imx296" => 15,
             "ov5647" => 63,
@@ -335,6 +336,7 @@ impl RpiCamera {
             // These values are determined empirically by using the exposure_sweep
             // test program.
             "imx477" => 6,
+            "imx219" => 4,
             "imx290" => 3,
             "imx296" => 4,
             "ov5647" => 4,
