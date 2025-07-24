@@ -144,28 +144,28 @@ impl RpiCamera {
             },
         };
 
-	// See https://git.libcamera.org/libcamera/libcamera.git/tree/src/libcamera/formats.cpp
-	let pisp_compressed = pixel_format.contains("PISP_COMP");
-	let pisp_compression_mode =
-	    if pisp_compressed {
-		match pixel_format.chars().last().unwrap() {
-		    '1' => 1,
-		    '2' => 2,
-		    '3' => 3,
-		    _ => panic!("Unexpected PiSP compression mode {}", pixel_format),
-		}
-	    } else {
-		0  // Don't care.
-	    };
+        // See https://git.libcamera.org/libcamera/libcamera.git/tree/src/libcamera/formats.cpp
+        let pisp_compressed = pixel_format.contains("PISP_COMP");
+        let pisp_compression_mode =
+            if pisp_compressed {
+                match pixel_format.chars().last().unwrap() {
+                    '1' => 1,
+                    '2' => 2,
+                    '3' => 3,
+                    _ => panic!("Unexpected PiSP compression mode {}", pixel_format),
+                }
+            } else {
+                0  // Don't care.
+            };
         let is_12_bit = pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
         let is_10_bit = pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
         let is_packed = pixel_format.ends_with("_CSI2P");
-	let is_color =
-	    if pisp_compressed {
-	        !pixel_format.contains("MONO")
-	    } else {
+        let is_color =
+            if pisp_compressed {
+                !pixel_format.contains("MONO")
+            } else {
                 pixel_format.starts_with("S")
-	    };
+            };
 
         // Annoyingly, different Rpi cameras have different analog gain values.
         let min_gain = match model.as_str() {
@@ -192,7 +192,7 @@ impl RpiCamera {
                 model_detail: model_detail,
                 min_gain, max_gain,
                 width, height,
-		pisp_compressed, pisp_compression_mode,
+                pisp_compressed, pisp_compression_mode,
                 is_10_bit, is_12_bit, is_packed,
                 camera_settings: CaptureParams::new(),
                 setting_changed: false,
@@ -458,8 +458,8 @@ impl RpiCamera {
             last_frame_time = Some(Instant::now());
             let width;
             let height;
-	    let pisp_compressed;
-	    let pisp_compression_mode;
+            let pisp_compressed;
+            let pisp_compression_mode;
             let is_10_bit;
             let is_12_bit;
             let is_packed;
@@ -468,8 +468,8 @@ impl RpiCamera {
                 let mut locked_state = state.lock().unwrap();
                 width = locked_state.width;
                 height = locked_state.height;
-		pisp_compressed = locked_state.pisp_compressed;
-		pisp_compression_mode = locked_state.pisp_compression_mode;
+                pisp_compressed = locked_state.pisp_compressed;
+                pisp_compression_mode = locked_state.pisp_compression_mode;
                 is_10_bit = locked_state.is_10_bit;
                 is_12_bit = locked_state.is_12_bit;
                 is_packed = locked_state.is_packed;
@@ -494,13 +494,13 @@ impl RpiCamera {
             let mut image_data = Vec::<u8>::with_capacity(num_pixels);
             unsafe { image_data.set_len(num_pixels) }
 
-	    if pisp_compressed {
-		pisp_compression::uncompress(stride, buf_data, &mut image_data,
-					     width, height, pisp_compression_mode);
-	    } else {
-		Self::convert_to_8bit(stride, buf_data, &mut image_data,
+            if pisp_compressed {
+                pisp_compression::uncompress(stride, buf_data, &mut image_data,
+                                             width, height, pisp_compression_mode);
+            } else {
+                Self::convert_to_8bit(stride, buf_data, &mut image_data,
                                       width, height, is_10_bit, is_12_bit, is_packed);
-	    }
+            }
             let image = GrayImage::from_raw(
                 width as u32, height as u32, image_data).unwrap();
 
