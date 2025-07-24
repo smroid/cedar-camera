@@ -337,7 +337,7 @@ impl RpiCamera {
             // test program.
             "imx477" => 6,
             "imx219" => 4,
-            "imx290" => 4,
+            "imx290" => 5,
             "imx296" => 4,
             "ov5647" => 4,
             "ov9281" => 3,
