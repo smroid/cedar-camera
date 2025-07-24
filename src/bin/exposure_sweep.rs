@@ -63,10 +63,6 @@ async fn main() {
                 }
             }
 
-            // let (captured_image, new_frame_id) =
-            //     camera.capture_image(Some(frame_id)).await.unwrap();
-            // frame_id = new_frame_id;
-
             // let image = &captured_image.image;
             let (background, noise);
             if camera.is_color() {
