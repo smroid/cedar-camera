@@ -455,6 +455,8 @@ impl RpiCamera {
                     break;  // Exit loop and cleanup.
                 },
             };
+            let metadata = req.metadata();
+
             last_frame_time = Some(Instant::now());
             let width;
             let height;
@@ -464,8 +466,17 @@ impl RpiCamera {
             let is_12_bit;
             let is_packed;
             let exp_duration: Duration;
+            let actual_exposure_duration;
+            let actual_abstract_gain;
             {
                 let mut locked_state = state.lock().unwrap();
+                actual_exposure_duration = metadata.get::<ExposureTime>()
+                    .map(|ExposureTime(exp_us)| Duration::from_micros(exp_us as u64))
+                    .ok();
+                actual_abstract_gain = metadata.get::<AnalogueGain>()
+                    .map(|AnalogueGain(gain)| Self::abstract_gain(
+                        gain, locked_state.min_gain, locked_state.max_gain))
+                    .ok();
                 width = locked_state.width;
                 height = locked_state.height;
                 pisp_compressed = locked_state.pisp_compressed;
@@ -518,7 +529,11 @@ impl RpiCamera {
             }
             if !locked_state.setting_changed {
                 locked_state.most_recent_capture = Some(CapturedImage {
-                    capture_params: locked_state.camera_settings,
+                    capture_params: CaptureParams {
+                        exposure_duration: actual_exposure_duration.unwrap(),
+                        gain: Gain::new(actual_abstract_gain.unwrap()),
+                        offset: locked_state.camera_settings.offset,
+                    },
                     params_accurate: mark_image_count == 0,
                     image: Arc::new(image),
                     readout_time: SystemTime::now(),
@@ -539,6 +554,13 @@ impl RpiCamera {
         let frac = abstract_gain as f64 / 100.0;
         let cmg = cam_min_gain as f64;
         (cmg + (cam_max_gain as f64 - cmg) * frac) as f32
+    }
+
+    // Translate camera analog gain to our 0..100 abstract gain.
+    fn abstract_gain(cam_gain: f32, cam_min_gain: i32, cam_max_gain: i32) -> i32 {
+        let cmg = cam_min_gain as f64;
+        let frac = (cam_gain as f64 - cmg) / (cam_max_gain as f64 - cmg);
+        (frac * 100.0).ceil().clamp(0.0, 100.0) as i32
     }
 
     async fn manage_worker_thread(&mut self) {

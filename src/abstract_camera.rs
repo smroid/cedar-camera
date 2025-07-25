@@ -86,12 +86,11 @@ pub struct CapturedImage {
     pub capture_params: CaptureParams,
 
     /// After a change to gain, exposure, or offset, the next few CapturedImages
-    /// will have the new `capture_params` but the `image` might still reflect
-    /// the previous parameters. This field identifies when `image` is
-    /// consistent with `capture_params`. Most consumers of `image` don't care,
-    /// but the auto-exposure and calibration algorithms need to be mindful not
-    /// to use `image` data to influence the exposure when `params_accurate` is
-    /// false.
+    /// will have their `image` still reflecting the previous parameters. This
+    /// field identifies when `image` is consistent with `capture_params`. Most
+    /// consumers of `image` don't care, but the auto-exposure and calibration
+    /// algorithms need to be mindful not to use `image` data to influence the
+    /// exposure when `params_accurate` is false.
     pub params_accurate: bool,
 
     /// 8 bit pixel data stored in row major order. For color cameras, the raw

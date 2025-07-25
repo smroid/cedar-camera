@@ -77,8 +77,8 @@ async fn main() {
             } else {
                 (background, noise) = estimate_background_from_image_region(image, &roi);
             }
-            info!("gain {}, exp time {}ms; background/noise {}/{}",
-                  gain, exp_ms, background, noise);
+            info!("params {:?}; background/noise {:.2}/{:.2}",
+                  captured_image.capture_params, background, noise);
 
             // Modify the filename to incorporate the gain and exposure time. The .bmp
             // extension is automatically appended (it should not be provided on the
