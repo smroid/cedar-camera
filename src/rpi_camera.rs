@@ -400,7 +400,7 @@ impl RpiCamera {
         active_cam.start(None).unwrap();
         if state.lock().unwrap().model == "imx290" {
             // This needs to be done after starting the camera.
-            Self::set_hcg_mode(true).unwrap();
+            // Self::set_hcg_mode(true).unwrap();
         }
         for req in reqs {
             active_cam.queue_request(req).unwrap();
