@@ -1,4 +1,4 @@
-// Copyright (c) 2023 Steven Rosenthal smr@dt3.org
+// Copyright (c) 2025 Steven Rosenthal smr@dt3.org
 // See LICENSE file in root directory for license terms.
 
 use canonical_error::{CanonicalError, failed_precondition_error, unimplemented_error};
@@ -86,6 +86,10 @@ struct SharedState {
 
     // Set by stop(); the capture thread exits when it sees this.
     stop_request: bool,
+
+    // HCG (High Conversion Gain) mode state for IMX290 sensors.
+    hcg_enabled: bool,
+    hcg_needs_reinit: bool,
 }
 
 impl RpiCamera {
@@ -201,6 +205,8 @@ impl RpiCamera {
                 most_recent_capture: None,
                 frame_id: 0,
                 stop_request: false,
+                hcg_enabled: false,
+                hcg_needs_reinit: false,
             })),
             capture_thread: None,
         };
@@ -398,10 +404,6 @@ impl RpiCamera {
         }
         // Enqueue all requests to the camera.
         active_cam.start(None).unwrap();
-        if state.lock().unwrap().model == "imx290" {
-            // This needs to be done after starting the camera.
-            // Self::set_hcg_mode(true).unwrap();
-        }
         for req in reqs {
             active_cam.queue_request(req).unwrap();
         }
@@ -488,6 +490,18 @@ impl RpiCamera {
                 if locked_state.setting_changed {
                     mark_image_count = pipeline_depth;
                     locked_state.setting_changed = false;
+                    
+                    // Handle HCG mode changes for IMX290.
+                    if locked_state.model == "imx290" && locked_state.hcg_needs_reinit {
+                        if let Err(e) = Self::set_hcg_mode(locked_state.hcg_enabled) {
+                            log::error!("Failed to set IMX290 HCG mode: {}", e);
+                        } else {
+                            log::info!("Successfully set IMX290 HCG mode to: {}", locked_state.hcg_enabled);
+                        }
+                        locked_state.hcg_needs_reinit = false;
+                        // Add extra delay for HCG changes to take effect.
+                        mark_image_count = pipeline_depth + 2;
+                    }
                 } else if mark_image_count > 0 {
                     mark_image_count -= 1;
                 }
@@ -733,6 +747,19 @@ impl AbstractCamera for RpiCamera {
 
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
         let mut locked_state = self.state.lock().unwrap();
+        
+        // Handle HCG mode switching for IMX290 based on gain threshold.
+        if locked_state.model == "imx290" {
+            let should_enable_hcg = gain.value() >= 50;
+            if locked_state.hcg_enabled != should_enable_hcg {
+                log::info!("Switching IMX290 HCG mode: {} -> {}", 
+                          locked_state.hcg_enabled, should_enable_hcg);
+                locked_state.hcg_enabled = should_enable_hcg;
+                locked_state.hcg_needs_reinit = true;
+                RpiCamera::changed_setting(&mut locked_state);
+            }
+        }
+        
         if locked_state.camera_settings.gain != gain {
             RpiCamera::changed_setting(&mut locked_state);
         }
