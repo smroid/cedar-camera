@@ -496,7 +496,7 @@ impl RpiCamera {
                         if let Err(e) = Self::set_hcg_mode(locked_state.hcg_enabled) {
                             log::error!("Failed to set IMX290 HCG mode: {}", e);
                         } else {
-                            log::info!("Successfully set IMX290 HCG mode to: {}", locked_state.hcg_enabled);
+                            log::debug!("Successfully set IMX290 HCG mode to: {}", locked_state.hcg_enabled);
                         }
                         locked_state.hcg_needs_reinit = false;
                         // Add extra delay for HCG changes to take effect.
@@ -616,7 +616,7 @@ impl RpiCamera {
             let error = String::from_utf8_lossy(&output.stderr);
             return Err(format!("Failed to set HCG: {}", error).into());
         }
-        log::info!("HCG mode set to: {}", enable);
+        log::debug!("HCG mode set to: {}", enable);
         Ok(())
     }
 
@@ -651,7 +651,7 @@ impl RpiCamera {
         let candidate_buses = [11, 1, 0, 10, 12, 13, 14, 15];
         for &bus in &candidate_buses {
             if Self::test_imx290_on_bus(bus)? {
-                log::info!("Found IMX290 on I2C bus {}", bus);
+                log::debug!("Found IMX290 on I2C bus {}", bus);
                 return Ok(bus);
             }
         }
@@ -752,8 +752,8 @@ impl AbstractCamera for RpiCamera {
         if locked_state.model == "imx290" {
             let should_enable_hcg = gain.value() >= 50;
             if locked_state.hcg_enabled != should_enable_hcg {
-                log::info!("Switching IMX290 HCG mode: {} -> {}", 
-                          locked_state.hcg_enabled, should_enable_hcg);
+                log::debug!("Switching IMX290 HCG mode: {} -> {}", 
+                            locked_state.hcg_enabled, should_enable_hcg);
                 locked_state.hcg_enabled = should_enable_hcg;
                 locked_state.hcg_needs_reinit = true;
                 RpiCamera::changed_setting(&mut locked_state);
