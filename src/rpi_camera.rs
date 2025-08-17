@@ -9,7 +9,7 @@ use image::GrayImage;
 use log::{debug, info, warn};
 use std::fs;
 use std::process::Command;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, OnceLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use libcamera::{
@@ -22,6 +22,7 @@ use libcamera::{
     framebuffer_map::MemoryMappedFrameBuffer,
     geometry,
     logging::{log_set_target, LoggingTarget},
+    pixel_format::PixelFormat,
     properties,
     request::{ReuseFlag},
     stream::StreamRole,
@@ -30,6 +31,22 @@ use libcamera::{
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
                              EnumeratedCameraInfo, Gain, Offset};
 use crate::pisp_compression;
+
+pub type ConvertFn = fn(
+    stride: usize,
+    buf_data: &[u8],
+    image_data: &mut [u8],
+    width: usize,
+    height: usize,
+    is_10_bit: bool,
+    is_12_bit: bool,
+    is_packed: bool,
+);
+static CONVERT_FN: OnceLock<ConvertFn> = OnceLock::new();
+pub fn set_converter(func: ConvertFn) {
+    log::info!("Setting raw image converter function.");
+    let _ = CONVERT_FN.set(func);  // Ignores error if already set.
+}
 
 pub struct RpiCamera {
     // Dimensions, in mm, of the sensor.
@@ -166,9 +183,17 @@ impl RpiCamera {
         let is_packed = pixel_format.ends_with("_CSI2P");
         let is_color =
             if pisp_compressed {
-                !pixel_format.contains("MONO")
+                !pixel_format.contains("MONO") && !pixel_format.contains("GREY") &&
+                !pixel_format.contains("Y")
             } else {
-                pixel_format.starts_with("S")
+                // Bayer patterns (color): SRGGB, SGRBG, SGBRG, SBGGR.
+                // Monochrome patterns: Y8, Y10, Y12, GREY, MONO.
+                pixel_format.starts_with("S") && (
+                    pixel_format.contains("RGGB") ||
+                    pixel_format.contains("GRBG") ||
+                    pixel_format.contains("GBRG") ||
+                    pixel_format.contains("BGGR")
+                )
             };
 
         // Annoyingly, different Rpi cameras have different analog gain values.
@@ -219,15 +244,110 @@ impl RpiCamera {
     {
         // This will generate default configuration for Raw.
         let mut cfgs = cam.generate_configuration(&[StreamRole::Raw]).unwrap();
-        match cfgs.validate() {
-            CameraConfigurationStatus::Valid => (),
-            CameraConfigurationStatus::Adjusted => {
-                debug!("Camera configuration was adjusted: {:#?}", cfgs);
-            },
-            CameraConfigurationStatus::Invalid => {
-                return Err(failed_precondition_error(
-                    format!("Camera configuration was rejected: {:#?}", cfgs).as_str()));
-            },
+        let stream_config = cfgs.get(0).unwrap();
+        let original_format = stream_config.get_pixel_format();
+
+        // Collect all available formats and look for optimal format
+        // (8-bit > 10-bit > 12-bit).
+        let formats = stream_config.formats();
+        let all_formats: Vec<PixelFormat> =
+            formats.pixel_formats().into_iter().collect();
+        let mut preferred_format: Option<PixelFormat> = None;
+        let mut format_type = "";
+
+        // First pass: look for 8-bit format (most efficient).
+        for format in &all_formats {
+            let pix_fmt = format!("{:?}", format);
+            if pix_fmt.contains("8") &&
+               (pix_fmt.contains("RGGB") || pix_fmt.contains("GREY") ||
+                pix_fmt.contains("Y8") || pix_fmt.contains("8_CSI2P"))
+            {
+                preferred_format = Some(*format);
+                format_type = "8-bit";
+                break;
+            }
+        }
+        // Second pass: look for 10-bit format if no 8-bit found.
+        if preferred_format.is_none() {
+            for format in &all_formats {
+                let pix_fmt = format!("{:?}", format);
+                if pix_fmt.contains("10") &&
+                   (pix_fmt.contains("RGGB") || pix_fmt.contains("GREY") ||
+                    pix_fmt.contains("Y10") || pix_fmt.contains("10_CSI2P"))
+                {
+                    preferred_format = Some(*format);
+                    format_type = "10-bit";
+                    break;
+                }
+            }
+        }
+
+        // Try to set preferred format if available.
+        if let Some(target_format) = preferred_format {
+            {
+                let mut stream_config = cfgs.get_mut(0).unwrap();
+                stream_config.set_pixel_format(target_format);
+            }
+            // Check the result of attempting to set the pixel format.
+            match cfgs.validate() {
+                CameraConfigurationStatus::Valid => {
+                    let current_format = cfgs.get(0).unwrap().get_pixel_format();
+                    if current_format == target_format {
+                        info!("Using {} format: {:?}", format_type, current_format);
+                    } else {
+                        info!("Using adjusted format: {:?} (requested {})",
+                              current_format, format_type);
+                    }
+                },
+                CameraConfigurationStatus::Adjusted => {
+                    let current_format = cfgs.get(0).unwrap().get_pixel_format();
+                    info!("Using adjusted format: {:?} (requested {})",
+                          current_format, format_type);
+                    debug!("Camera configuration was adjusted: {:#?}", cfgs);
+                },
+                CameraConfigurationStatus::Invalid => {
+                    // Fallback to original format if preferred format not
+                    // supported.
+                    warn!("{} format rejected, listing available formats:",
+                          format_type);
+                    for format in &all_formats {
+                        warn!("  {:?}", format);
+                    }
+                    {
+                        let mut stream_config = cfgs.get_mut(0).unwrap();
+                        stream_config.set_pixel_format(original_format);
+                    }
+                    match cfgs.validate() {
+                        CameraConfigurationStatus::Valid | CameraConfigurationStatus::Adjusted => {
+                            warn!("Using fallback format: {:?}", original_format);
+                        },
+                        CameraConfigurationStatus::Invalid => {
+                            return Err(failed_precondition_error(
+                                format!("Camera configuration was rejected: {:#?}",
+                                        cfgs).as_str()));
+                        },
+                    }
+                },
+            }
+        } else {
+            // No preferred format found - list all available formats.
+            warn!("No 8-bit or 10-bit format found. Available formats:");
+            for format in &all_formats {
+                warn!("  {:?}", format);
+            }
+            let default_format = cfgs.get(0).unwrap().get_pixel_format();
+            warn!("Using default format: {:?}", default_format);
+            match cfgs.validate() {
+                CameraConfigurationStatus::Valid => (),
+                CameraConfigurationStatus::Adjusted => {
+                    debug!("Camera configuration was adjusted: {:#?}", cfgs);
+                },
+                CameraConfigurationStatus::Invalid => {
+                    return Err(failed_precondition_error(
+                        format!("Camera configuration was rejected: {:#?}",
+                                cfgs).as_str()));
+                },
+            }
         }
         Ok(cfgs)
     }
@@ -274,58 +394,77 @@ impl RpiCamera {
                        is_10_bit: bool,
                        is_12_bit: bool,
                        is_packed: bool) {
-        if is_10_bit {
-            if is_packed {
-                // Convert from packed 10 bit to 8 bit.
-                for row in 0..height {
-                    let buf_row_start = row * stride;
-                    let buf_row_end = buf_row_start + width*5/4;
-                    let pix_row_start = row * width;
-                    let pix_row_end = pix_row_start + width;
-                    for (buf_chunk, pix_chunk)
-                        in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
-                            image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
-                    {
-                        // Keep upper 8 bits; discard 2 lsb.
-                        let pix0 = buf_chunk[0];
-                        let pix1 = buf_chunk[1];
-                        let pix2 = buf_chunk[2];
-                        let pix3 = buf_chunk[3];
-                        // pix4 has the lsb values, which we discard.
-                        pix_chunk[0] = pix0;
-                        pix_chunk[1] = pix1;
-                        pix_chunk[2] = pix2;
-                        pix_chunk[3] = pix3;
-                    }
-                }
+        // Handle 8-bit format: no conversion needed, direct copy.
+        if !is_10_bit && !is_12_bit {
+            // For 8-bit, stride should equal width (1 byte per pixel).
+            if stride == width {
+                // Simple copy for contiguous data.
+                image_data[..width * height].copy_from_slice(&buf_data[..width * height]);
             } else {
-                panic!("Unpacked raw not yet supported");
+                // Copy row by row if there's stride padding.
+                for row in 0..height {
+                    let src_start = row * stride;
+                    let dst_start = row * width;
+                    image_data[dst_start..dst_start + width]
+                        .copy_from_slice(&buf_data[src_start..src_start + width]);
+                }
             }
-        } else if is_12_bit {
-            if is_packed {
-                // Convert from packed 12 bit to 8 bit.
-                for row in 0..height {
-                    let buf_row_start = row * stride;
-                    let buf_row_end = buf_row_start + width*3/2;
-                    let pix_row_start = row * width;
-                    let pix_row_end = pix_row_start + width;
-                    for (buf_chunk, pix_pair)
-                        in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
-                            image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
-                    {
-                        // Keep upper 8 bits; discard 4 lsb.
-                        let pix0 = buf_chunk[0];
-                        let pix1 = buf_chunk[1];
-                        // pix2 has the lsb values, which we discard.
-                        pix_pair[0] = pix0;
-                        pix_pair[1] = pix1;
-                    }
+            return;
+        }
+
+        // Use optimized function if we have one.
+        if let Some(f) = CONVERT_FN.get() {
+            f(stride, buf_data, image_data, width, height,
+              is_10_bit, is_12_bit, is_packed);
+            return;
+        }
+        if !is_packed {
+            panic!("Unpacked raw not yet supported");
+        }
+        if is_10_bit {
+            // Convert from packed 10 bit to 8 bit.
+            for row in 0..height {
+                let buf_row_start = row * stride;
+                let buf_row_end = buf_row_start + width*5/4;
+                let pix_row_start = row * width;
+                let pix_row_end = pix_row_start + width;
+                for (buf_chunk, pix_chunk)
+                    in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
+                        image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
+                {
+                    // Keep upper 8 bits; discard 2 lsb.
+                    let pix0 = buf_chunk[0];
+                    let pix1 = buf_chunk[1];
+                    let pix2 = buf_chunk[2];
+                    let pix3 = buf_chunk[3];
+                    // pix4 has the lsb values, which we discard.
+                    pix_chunk[0] = pix0;
+                    pix_chunk[1] = pix1;
+                    pix_chunk[2] = pix2;
+                    pix_chunk[3] = pix3;
                 }
-            } else {
-                panic!("Unpacked raw not yet supported");
             }
         } else {
-            panic!("8 bit raw not yet supported");
+            // Must be 12-bit since we handled 8-bit and 10-bit above
+            assert!(is_12_bit, "Expected 12-bit format");
+            // Convert from packed 12 bit to 8 bit.
+            for row in 0..height {
+                let buf_row_start = row * stride;
+                let buf_row_end = buf_row_start + width*3/2;
+                let pix_row_start = row * width;
+                let pix_row_end = pix_row_start + width;
+                for (buf_chunk, pix_pair)
+                    in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
+                        image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
+                {
+                    // Keep upper 8 bits; discard 4 lsb.
+                    let pix0 = buf_chunk[0];
+                    let pix1 = buf_chunk[1];
+                    // pix2 has the lsb values, which we discard.
+                    pix_pair[0] = pix0;
+                    pix_pair[1] = pix1;
+                }
+            }
         }
     }
 
@@ -362,10 +501,8 @@ impl RpiCamera {
         let cam = cameras.get(0).expect("No cameras found");
         let mut active_cam = cam.acquire().expect("Unable to acquire camera");
 
-        let mut cfgs = cam.generate_configuration(&[StreamRole::Raw]).unwrap();
-        if let CameraConfigurationStatus::Invalid = cfgs.validate() {
-            panic!("Camera configuration was rejected: {:#?}", cfgs);
-        }
+        let mut cfgs = Self::get_camera_configs(&cam).expect(
+            "Failed to get camera configs in worker");
         active_cam.configure(&mut cfgs).expect("Unable to configure camera");
         let cfg = cfgs.get(0).unwrap();
         let stride = cfg.get_stride() as usize;
@@ -490,7 +627,7 @@ impl RpiCamera {
                 if locked_state.setting_changed {
                     mark_image_count = pipeline_depth;
                     locked_state.setting_changed = false;
-                    
+
                     // Handle HCG mode changes for IMX290.
                     if locked_state.model == "imx290" && locked_state.hcg_needs_reinit {
                         if let Err(e) = Self::set_hcg_mode(locked_state.hcg_enabled) {
@@ -747,19 +884,19 @@ impl AbstractCamera for RpiCamera {
 
     fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
         let mut locked_state = self.state.lock().unwrap();
-        
+
         // Handle HCG mode switching for IMX290 based on gain threshold.
         if locked_state.model == "imx290" {
             let should_enable_hcg = gain.value() >= 50;
             if locked_state.hcg_enabled != should_enable_hcg {
-                log::debug!("Switching IMX290 HCG mode: {} -> {}", 
+                log::debug!("Switching IMX290 HCG mode: {} -> {}",
                             locked_state.hcg_enabled, should_enable_hcg);
                 locked_state.hcg_enabled = should_enable_hcg;
                 locked_state.hcg_needs_reinit = true;
                 RpiCamera::changed_setting(&mut locked_state);
             }
         }
-        
+
         if locked_state.camera_settings.gain != gain {
             RpiCamera::changed_setting(&mut locked_state);
         }
