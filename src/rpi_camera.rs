@@ -173,7 +173,7 @@ impl RpiCamera {
                     '1' => 1,
                     '2' => 2,
                     '3' => 3,
-                    _ => panic!("Unexpected PiSP compression mode {}", pixel_format),
+                    _ => panic!("Unexpected PiSP compression mode: {}", pixel_format),
                 }
             } else {
                 0  // Don't care.
@@ -284,10 +284,7 @@ impl RpiCamera {
 
         // Try to set preferred format if available.
         if let Some(target_format) = preferred_format {
-            {
-                let mut stream_config = cfgs.get_mut(0).unwrap();
-                stream_config.set_pixel_format(target_format);
-            }
+            cfgs.get_mut(0).unwrap().set_pixel_format(target_format);
             // Check the result of attempting to set the pixel format.
             match cfgs.validate() {
                 CameraConfigurationStatus::Valid => {
@@ -313,10 +310,7 @@ impl RpiCamera {
                     for format in &all_formats {
                         warn!("  {:?}", format);
                     }
-                    {
-                        let mut stream_config = cfgs.get_mut(0).unwrap();
-                        stream_config.set_pixel_format(original_format);
-                    }
+                    cfgs.get_mut(0).unwrap().set_pixel_format(original_format);
                     match cfgs.validate() {
                         CameraConfigurationStatus::Valid | CameraConfigurationStatus::Adjusted => {
                             warn!("Using fallback format: {:?}", original_format);
@@ -419,7 +413,7 @@ impl RpiCamera {
             return;
         }
         if !is_packed {
-            panic!("Unpacked raw not yet supported");
+            panic!("Unpacked raw format not yet supported");
         }
         if is_10_bit {
             // Convert from packed 10 bit to 8 bit.
@@ -499,11 +493,11 @@ impl RpiCamera {
         log_set_target(LoggingTarget::None).unwrap();
         let cameras = mgr.cameras();
         let cam = cameras.get(0).expect("No cameras found");
-        let mut active_cam = cam.acquire().expect("Unable to acquire camera");
+        let mut active_cam = cam.acquire().expect("Failed to acquire camera");
 
         let mut cfgs = Self::get_camera_configs(&cam).expect(
             "Failed to get camera configs in worker");
-        active_cam.configure(&mut cfgs).expect("Unable to configure camera");
+        active_cam.configure(&mut cfgs).expect("Failed to configure camera");
         let cfg = cfgs.get(0).unwrap();
         let stride = cfg.get_stride() as usize;
 
