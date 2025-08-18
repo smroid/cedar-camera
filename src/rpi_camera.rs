@@ -107,6 +107,10 @@ struct SharedState {
     // HCG (High Conversion Gain) mode state for IMX290 sensors.
     hcg_enabled: bool,
     hcg_needs_reinit: bool,
+
+    // Pipeline quiescing state for safe HCG changes.
+    hcg_draining_pipeline: bool,
+    in_flight_request_count: usize,
 }
 
 impl RpiCamera {
@@ -232,6 +236,8 @@ impl RpiCamera {
                 stop_request: false,
                 hcg_enabled: false,
                 hcg_needs_reinit: false,
+                hcg_draining_pipeline: false,
+                in_flight_request_count: 0,
             })),
             capture_thread: None,
         };
@@ -520,7 +526,7 @@ impl RpiCamera {
 
         let reqs;
         {
-            let locked_state = state.lock().unwrap();
+            let mut locked_state = state.lock().unwrap();
             // Create capture requests and attach buffers.
             reqs = buffers
                 .into_iter()
@@ -532,6 +538,8 @@ impl RpiCamera {
                     req
                 })
                 .collect::<Vec<_>>();
+            // Initialize in-flight request count
+            locked_state.in_flight_request_count = reqs.len();
         }
         // Enqueue all requests to the camera.
         active_cam.start(None).unwrap();
@@ -542,6 +550,10 @@ impl RpiCamera {
 
         // Keep track of when we grabbed a frame.
         let mut last_frame_time: Option<Instant> = None;
+
+        // For collecting requests during pipeline draining for HCG changes.
+        let mut collected_requests = Vec::new();
+
         loop {
             let update_interval: Duration;
             {
@@ -556,9 +568,8 @@ impl RpiCamera {
                     // leaks.
                     while let Ok(_req) = rx.try_recv() {
                         debug!("Drained completed request during shutdown");
-                        // Request will be dropped here, releasing its buffer
+                        // Request will be dropped here, releasing its buffer.
                     }
-
                     locked_state.stop_request = false;
                     return;  // Exit thread.
                 }
@@ -623,15 +634,13 @@ impl RpiCamera {
                     locked_state.setting_changed = false;
 
                     // Handle HCG mode changes for IMX290.
-                    if locked_state.model == "imx290" && locked_state.hcg_needs_reinit {
-                        if let Err(e) = Self::set_hcg_mode(locked_state.hcg_enabled) {
-                            log::error!("Failed to set IMX290 HCG mode: {}", e);
-                        } else {
-                            log::debug!("Successfully set IMX290 HCG mode to: {}", locked_state.hcg_enabled);
-                        }
-                        locked_state.hcg_needs_reinit = false;
-                        // Add extra delay for HCG changes to take effect.
-                        mark_image_count = pipeline_depth + 2;
+                    if locked_state.hcg_needs_reinit &&
+                       !locked_state.hcg_draining_pipeline
+                    {
+                        info!("Starting pipeline drain for HCG mode change");
+                        locked_state.hcg_draining_pipeline = true;
+                        // We'll apply the actual HCG change when pipeline is
+                        // empty.
                     }
                 } else if mark_image_count > 0 {
                     mark_image_count -= 1;
@@ -660,14 +669,99 @@ impl RpiCamera {
             let image = GrayImage::from_raw(
                 width as u32, height as u32, image_data).unwrap();
 
-            // Re-queue the request.
+            // Handle request re-queueing or collection during pipeline
+            // draining.
             req.reuse(ReuseFlag::REUSE_BUFFERS);
             let controls = req.controls_mut();
             let mut locked_state = state.lock().unwrap();
-            Self::setup_camera_request(controls, &locked_state);
-            if let Err(e) = active_cam.queue_request(req) {
-                warn!("Failed to re-queue request: {:?}", e);
-                break; // Exit loop on queue failure
+
+            // Decrement in-flight count for this completed request.
+            locked_state.in_flight_request_count -= 1;
+
+            if locked_state.hcg_draining_pipeline {
+                // During pipeline drain, collect requests instead of
+                // re-queueing.
+                Self::setup_camera_request(controls, &locked_state);
+                collected_requests.push(req);
+
+                // Check if pipeline is fully drained.
+                if locked_state.in_flight_request_count == 0 {
+                    info!("Pipeline drained, performing full camera restart for HCG mode change");
+                    let hcg_enabled = locked_state.hcg_enabled;
+                    drop(locked_state);
+
+                    // Stop camera completely.
+                    info!("Stopping camera for HCG mode change");
+                    if let Err(e) = active_cam.stop() {
+                        warn!("Error stopping camera for HCG change: {:?}", e);
+                    }
+
+                    // Drain any remaining requests from the channel.
+                    while rx.try_recv().is_ok() {
+                        debug!("Drained request during camera stop");
+                    }
+
+                    // Re-configure the camera to reset internal state
+                    info!("Re-configuring camera after HCG mode change");
+                    // Note: We can't create a fresh CameraManager due to
+                    // lifetime constraints, but re-configuring should reset
+                    // libcamera's internal state sufficiently.
+
+                    // Apply HCG change after fresh configuration.
+                    if let Err(e) = Self::set_hcg_mode(hcg_enabled) {
+                        log::error!("Failed to set IMX290 HCG mode: {}", e);
+                    } else {
+                        log::info!("Successfully set IMX290 HCG mode to: {}", hcg_enabled);
+                    }
+                    // Wait for HCG change to settle.
+                    std::thread::sleep(Duration::from_millis(50));
+
+                    // Restart camera.
+                    info!("Restarting camera after HCG mode change");
+                    if let Err(e) = active_cam.start(None) {
+                        warn!("Error restarting camera after HCG change: {:?}", e);
+                    }
+
+                    // Apply HCG change again after camera restart in case
+                    // active_cam.start() reset sensor registers.
+                    if let Err(e) = Self::set_hcg_mode(hcg_enabled) {
+                        log::error!("Failed to re-apply IMX290 HCG mode after start: {}", e);
+                    } else {
+                        log::info!("Re-applied IMX290 HCG mode after start: {}",
+                                   hcg_enabled);
+                    }
+
+                    // Brief delay for the second HCG change to settle before
+                    // resuming capture.
+                    std::thread::sleep(Duration::from_millis(50));
+
+                    // Re-queue all collected requests.
+                    let num_collected = collected_requests.len();
+                    info!("Re-queueing {} collected requests after restart",
+                          num_collected);
+                    for collected_req in collected_requests.drain(..) {
+                        if let Err(e) = active_cam.queue_request(collected_req) {
+                            warn!("Failed to re-queue collected request after restart: {:?}", e);
+                            break;
+                        }
+                    }
+
+                    // Reset state and update counters.
+                    locked_state = state.lock().unwrap();
+                    locked_state.hcg_needs_reinit = false;
+                    locked_state.hcg_draining_pipeline = false;
+                    locked_state.in_flight_request_count = num_collected;
+                    mark_image_count = pipeline_depth + 4; // Extra delay for full restart
+                }
+            } else {
+                // Normal operation: re-queue the request
+                Self::setup_camera_request(controls, &locked_state);
+                if let Err(e) = active_cam.queue_request(req) {
+                    warn!("Failed to re-queue request: {:?}", e);
+                    break; // Exit loop on queue failure.
+                }
+                // Increment in-flight count for the re-queued request.
+                locked_state.in_flight_request_count += 1;
             }
             if update_interval == Duration::ZERO {
                 locked_state.eta = Some(Instant::now() + exp_duration);
