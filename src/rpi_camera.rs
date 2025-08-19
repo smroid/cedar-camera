@@ -294,18 +294,9 @@ impl RpiCamera {
             // Check the result of attempting to set the pixel format.
             match cfgs.validate() {
                 CameraConfigurationStatus::Valid => {
-                    let current_format = cfgs.get(0).unwrap().get_pixel_format();
-                    if current_format == target_format {
-                        info!("Using {} format: {:?}", format_type, current_format);
-                    } else {
-                        info!("Using adjusted format: {:?} (requested {})",
-                              current_format, format_type);
-                    }
+                    // Success - no logging needed in normal case.
                 },
                 CameraConfigurationStatus::Adjusted => {
-                    let current_format = cfgs.get(0).unwrap().get_pixel_format();
-                    info!("Using adjusted format: {:?} (requested {})",
-                          current_format, format_type);
                     debug!("Camera configuration was adjusted: {:#?}", cfgs);
                 },
                 CameraConfigurationStatus::Invalid => {
@@ -503,12 +494,24 @@ impl RpiCamera {
 
         let mut cfgs = Self::get_camera_configs(&cam).expect(
             "Failed to get camera configs in worker");
+
+        // Increase buffer count by 1 to allow re-queueing before processing
+        // completes.
+        {
+            let mut cfg = cfgs.get_mut(0).unwrap();
+            let original_buffer_count = cfg.get_buffer_count();
+            cfg.set_buffer_count(original_buffer_count + 1);
+        }
+
         active_cam.configure(&mut cfgs).expect("Failed to configure camera");
         let cfg = cfgs.get(0).unwrap();
         let stride = cfg.get_stride() as usize;
 
-        // Completed capture requests are returned as a callback, which stuffs the
-        // completed request into a channel.
+        // Log the selected format.
+        info!("Using camera format: {:?}", cfg.get_pixel_format());
+
+        // Completed capture requests are returned as a callback, which stuffs
+        // the completed request into a channel.
         let (tx, rx) = std::sync::mpsc::channel();
         active_cam.on_request_completed(move |req| {
             tx.send(req).unwrap();
@@ -518,13 +521,14 @@ impl RpiCamera {
         let mut alloc = FrameBufferAllocator::new(&cam);
         let stream = cfg.stream().unwrap();
         let buffers = alloc.alloc(&stream).unwrap();
-        // Convert FrameBuffer to MemoryMappedFrameBuffer, which allows reading &[u8].
+        // Convert FrameBuffer to MemoryMappedFrameBuffer, which allows reading
+        // &[u8].
         let buffers = buffers
             .into_iter()
             .map(|buf| MemoryMappedFrameBuffer::new(buf).unwrap())
             .collect::<Vec<_>>();
 
-        let reqs;
+        let mut reqs;
         {
             let mut locked_state = state.lock().unwrap();
             // Create capture requests and attach buffers.
@@ -538,21 +542,32 @@ impl RpiCamera {
                     req
                 })
                 .collect::<Vec<_>>();
-            // Initialize in-flight request count
+            // Initialize in-flight request count (will be reduced by 1 when we
+            // hold back spare).
             locked_state.in_flight_request_count = reqs.len();
         }
-        // Enqueue all requests to the camera.
+
+        // Enqueue all but one request to the camera, holding back one for
+        // immediate re-queueing.
         active_cam.start(None).unwrap();
+        let spare_request = reqs.pop().expect(
+            "Need at least one buffer for spare request");
         for req in reqs {
             active_cam.queue_request(req).unwrap();
         }
-        info!("Starting capturing");
+        // Adjust in-flight count since we held back one request.
+        {
+            let mut locked_state = state.lock().unwrap();
+            locked_state.in_flight_request_count -= 1;
+        }
 
         // Keep track of when we grabbed a frame.
         let mut last_frame_time: Option<Instant> = None;
 
         // For collecting requests during pipeline draining for HCG changes.
         let mut collected_requests = Vec::new();
+        // Spare request for immediate re-queueing
+        let mut spare_request = Some(spare_request);
 
         loop {
             let update_interval: Duration;
@@ -581,11 +596,9 @@ impl RpiCamera {
                 let now = Instant::now();
                 if next_update_time > now {
                     let delay = next_update_time - now;
-                    state.lock().unwrap().eta = Some(now + delay);
                     std::thread::sleep(delay);
                     continue;
                 }
-                state.lock().unwrap().eta = None;
             }
             // Time to grab a frame.
             let mut req = match rx.recv_timeout(Duration::from_secs(5)) {
@@ -602,6 +615,8 @@ impl RpiCamera {
             let metadata = req.metadata();
 
             last_frame_time = Some(Instant::now());
+            let readout_time = SystemTime::now();
+
             let width;
             let height;
             let pisp_compressed;
@@ -609,7 +624,6 @@ impl RpiCamera {
             let is_10_bit;
             let is_12_bit;
             let is_packed;
-            let exp_duration: Duration;
             let actual_exposure_duration;
             let actual_abstract_gain;
             {
@@ -628,7 +642,6 @@ impl RpiCamera {
                 is_10_bit = locked_state.is_10_bit;
                 is_12_bit = locked_state.is_12_bit;
                 is_packed = locked_state.is_packed;
-                exp_duration = locked_state.camera_settings.exposure_duration;
                 if locked_state.setting_changed {
                     mark_image_count = pipeline_depth;
                     locked_state.setting_changed = false;
@@ -637,7 +650,7 @@ impl RpiCamera {
                     if locked_state.hcg_needs_reinit &&
                        !locked_state.hcg_draining_pipeline
                     {
-                        info!("Starting pipeline drain for HCG mode change");
+                        debug!("Starting pipeline drain for HCG mode change");
                         locked_state.hcg_draining_pipeline = true;
                         // We'll apply the actual HCG change when pipeline is
                         // empty.
@@ -653,6 +666,32 @@ impl RpiCamera {
             // Raw format has only one data plane containing bayer or mono data.
             let planes = framebuffer.data();
             let buf_data = planes.first().unwrap();
+
+            // Early re-queueing: immediately queue the spare request before
+            // expensive processing (unless we're draining the pipeline for HCG
+            // changes).
+            if let Some(mut spare) = spare_request.take() {
+                let controls = spare.controls_mut();
+                let locked_state = state.lock().unwrap();
+                let draining = locked_state.hcg_draining_pipeline;
+                Self::setup_camera_request(controls, &locked_state);
+                drop(locked_state);
+
+                if draining {
+                    // During pipeline drain, collect the spare request instead
+                    // of queueing.
+                    collected_requests.push(spare);
+                } else {
+                    // Normal operation: queue the spare request immediately.
+                    if let Err(e) = active_cam.queue_request(spare) {
+                        warn!("Failed to queue spare request: {:?}", e);
+                    } else {
+                        // Update in-flight count for the queued spare request.
+                        let mut locked_state = state.lock().unwrap();
+                        locked_state.in_flight_request_count += 1;
+                    }
+                }
+            }
 
             // Allocate uninitialized storage to receive the converted image data.
             let num_pixels = width * height;
@@ -686,23 +725,21 @@ impl RpiCamera {
 
                 // Check if pipeline is fully drained.
                 if locked_state.in_flight_request_count == 0 {
-                    info!("Pipeline drained, performing full camera restart for HCG mode change");
+                    debug!("Pipeline drained, performing full camera restart for HCG mode change");
                     let hcg_enabled = locked_state.hcg_enabled;
                     drop(locked_state);
 
                     // Stop camera completely.
-                    info!("Stopping camera for HCG mode change");
+                    debug!("Stopping camera for HCG mode change");
                     if let Err(e) = active_cam.stop() {
                         warn!("Error stopping camera for HCG change: {:?}", e);
                     }
-
                     // Drain any remaining requests from the channel.
                     while rx.try_recv().is_ok() {
                         debug!("Drained request during camera stop");
                     }
-
                     // Re-configure the camera to reset internal state
-                    info!("Re-configuring camera after HCG mode change");
+                    debug!("Re-configuring camera after HCG mode change");
                     // Note: We can't create a fresh CameraManager due to
                     // lifetime constraints, but re-configuring should reset
                     // libcamera's internal state sufficiently.
@@ -711,34 +748,33 @@ impl RpiCamera {
                     if let Err(e) = Self::set_hcg_mode(hcg_enabled) {
                         log::error!("Failed to set IMX290 HCG mode: {}", e);
                     } else {
-                        log::info!("Successfully set IMX290 HCG mode to: {}", hcg_enabled);
+                        log::info!("Successfully set IMX290 HCG mode to: {}",
+                                   hcg_enabled);
                     }
                     // Wait for HCG change to settle.
                     std::thread::sleep(Duration::from_millis(50));
 
                     // Restart camera.
-                    info!("Restarting camera after HCG mode change");
+                    debug!("Restarting camera after HCG mode change");
                     if let Err(e) = active_cam.start(None) {
                         warn!("Error restarting camera after HCG change: {:?}", e);
                     }
-
                     // Apply HCG change again after camera restart in case
                     // active_cam.start() reset sensor registers.
                     if let Err(e) = Self::set_hcg_mode(hcg_enabled) {
                         log::error!("Failed to re-apply IMX290 HCG mode after start: {}", e);
                     } else {
-                        log::info!("Re-applied IMX290 HCG mode after start: {}",
-                                   hcg_enabled);
+                        log::debug!("Re-applied IMX290 HCG mode after start: {}",
+                                    hcg_enabled);
                     }
-
                     // Brief delay for the second HCG change to settle before
                     // resuming capture.
                     std::thread::sleep(Duration::from_millis(50));
 
                     // Re-queue all collected requests.
                     let num_collected = collected_requests.len();
-                    info!("Re-queueing {} collected requests after restart",
-                          num_collected);
+                    debug!("Re-queueing {} collected requests after restart",
+                           num_collected);
                     for collected_req in collected_requests.drain(..) {
                         if let Err(e) = active_cam.queue_request(collected_req) {
                             warn!("Failed to re-queue collected request after restart: {:?}", e);
@@ -751,21 +787,18 @@ impl RpiCamera {
                     locked_state.hcg_needs_reinit = false;
                     locked_state.hcg_draining_pipeline = false;
                     locked_state.in_flight_request_count = num_collected;
-                    mark_image_count = pipeline_depth + 4; // Extra delay for full restart
+                    // Extra delay for full restart.
+                    mark_image_count = pipeline_depth + 4;
                 }
             } else {
-                // Normal operation: re-queue the request
+                // Normal operation: store current request as spare for next
+                // early re-queue.
                 Self::setup_camera_request(controls, &locked_state);
-                if let Err(e) = active_cam.queue_request(req) {
-                    warn!("Failed to re-queue request: {:?}", e);
-                    break; // Exit loop on queue failure.
-                }
-                // Increment in-flight count for the re-queued request.
-                locked_state.in_flight_request_count += 1;
+                spare_request = Some(req);
+                // Don't increment in-flight count since we're holding this as
+                // spare.
             }
-            if update_interval == Duration::ZERO {
-                locked_state.eta = Some(Instant::now() + exp_duration);
-            }
+
             if !locked_state.setting_changed {
                 locked_state.most_recent_capture = Some(CapturedImage {
                     capture_params: CaptureParams {
@@ -775,9 +808,19 @@ impl RpiCamera {
                     },
                     params_accurate: mark_image_count == 0,
                     image: Arc::new(image),
-                    readout_time: SystemTime::now(),
+                    readout_time,
                 });
                 locked_state.frame_id += 1;
+
+                // Estimate of time at which `most_recent_capture` will next be
+                // updated.
+                let now = Instant::now();
+                if update_interval == Duration::ZERO {
+                    locked_state.eta = Some(
+                        now + actual_exposure_duration.unwrap());
+                } else {
+                    locked_state.eta = Some(now + update_interval);
+                }
             }
         }  // loop.
         // Fallback cleanup if loop exits unexpectedly.
