@@ -81,8 +81,7 @@ impl CaptureParams {
 
 #[derive(Clone, Debug)]
 pub struct CapturedImage {
-    /// The parameters that were in effect when the image capture
-    /// occurred.
+    /// The parameters that were in effect when the image capture occurred.
     pub capture_params: CaptureParams,
 
     /// After a change to gain, exposure, or offset, the next few CapturedImages
@@ -102,6 +101,15 @@ pub struct CapturedImage {
     pub image: Arc<GrayImage>,
 
     pub readout_time: SystemTime,
+
+    // For some camera interfaces (e.g. RPi), there is some post-readout
+    // processing needed i.e. to convert pixel format. Typically, this
+    // processing is overlapped with the next camera exposure; in such cases it
+    // is pointless to make the camera exposure time less than the processing
+    // time. We thus return the processing duration that was measured for this
+    // capture result so e.g. auto exposure algorithm can use this as the
+    // minimum exposure duration.
+    pub processing_duration: Option<Duration>,
 }
 
 /// AbstractCamera models an 8-bit greyscale camera. This trait defines methods

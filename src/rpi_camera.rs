@@ -659,6 +659,7 @@ impl RpiCamera {
                     mark_image_count -= 1;
                 }
             }
+            let start = Instant::now();
 
             // Grab the image.
             let framebuffer: &MemoryMappedFrameBuffer<FrameBuffer> =
@@ -707,6 +708,7 @@ impl RpiCamera {
             }
             let image = GrayImage::from_raw(
                 width as u32, height as u32, image_data).unwrap();
+            let processing_duration = Some(start.elapsed());
 
             // Handle request re-queueing or collection during pipeline
             // draining.
@@ -809,6 +811,7 @@ impl RpiCamera {
                     params_accurate: mark_image_count == 0,
                     image: Arc::new(image),
                     readout_time,
+                    processing_duration,
                 });
                 locked_state.frame_id += 1;
 
