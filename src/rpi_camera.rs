@@ -659,7 +659,6 @@ impl RpiCamera {
                     mark_image_count -= 1;
                 }
             }
-            let start = Instant::now();
 
             // Grab the image.
             let framebuffer: &MemoryMappedFrameBuffer<FrameBuffer> =
@@ -708,7 +707,11 @@ impl RpiCamera {
             }
             let image = GrayImage::from_raw(
                 width as u32, height as u32, image_data).unwrap();
-            let processing_duration = Some(start.elapsed());
+            // Empirically I have seen that there's a transfer time from the
+            // camera that is not captured in the measured processing_duration.
+            // Apply a fudge factor for the transfer time.
+            let processing_duration =
+                Some(last_frame_time.unwrap().elapsed().mul_f64(1.5));
 
             // Handle request re-queueing or collection during pipeline
             // draining.
