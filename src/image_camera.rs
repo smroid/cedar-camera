@@ -34,7 +34,7 @@ pub struct ImageCamera {
 impl ImageCamera {
     pub fn new(image: GrayImage) -> Result<Self, CanonicalError> {
         let mut ic = ImageCamera{image: Arc::new(image),
-                                 exposure_duration: Duration::from_millis(100),
+                                 exposure_duration: Duration::from_millis(50),
                                  offset: Offset::new(3),
                                  gain: Gain::new(50),
                                  update_interval: Duration::ZERO,
