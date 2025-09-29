@@ -807,8 +807,8 @@ impl RpiCamera {
             if !locked_state.setting_changed {
                 locked_state.most_recent_capture = Some(CapturedImage {
                     capture_params: CaptureParams {
-                        exposure_duration: actual_exposure_duration.unwrap(),
-                        gain: Gain::new(actual_abstract_gain.unwrap()),
+                        exposure_duration: actual_exposure_duration.unwrap_or(locked_state.camera_settings.exposure_duration),
+                        gain: Gain::new(actual_abstract_gain.unwrap_or(locked_state.camera_settings.gain.value())),
                         offset: locked_state.camera_settings.offset,
                     },
                     params_accurate: mark_image_count == 0,
@@ -823,7 +823,7 @@ impl RpiCamera {
                 let now = Instant::now();
                 if update_interval == Duration::ZERO {
                     locked_state.eta = Some(
-                        now + actual_exposure_duration.unwrap());
+                        now + actual_exposure_duration.unwrap_or(locked_state.camera_settings.exposure_duration));
                 } else {
                     locked_state.eta = Some(now + update_interval);
                 }
