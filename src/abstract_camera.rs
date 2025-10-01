@@ -204,10 +204,6 @@ pub fn bin_2x2(image: GrayImage) -> GrayImage {
     resize_2x2(image, Convolution(FilterType::Box))
 }
 
-pub fn sample_2x2(image: GrayImage) -> GrayImage {
-    resize_2x2(image, ResizeAlg::Nearest)
-}
-
 fn resize_2x2(image: GrayImage, alg: ResizeAlg) -> GrayImage {
     let (width, height) = image.dimensions();
     let resized_width = width / 2;
