@@ -222,7 +222,7 @@ impl RpiCamera {
             is_color,
             state: Arc::new(Mutex::new(SharedState{
                 model: model.to_string(),
-                model_detail: model_detail,
+                model_detail,
                 min_gain, max_gain,
                 width, height,
                 pisp_compressed, pisp_compression_mode,
@@ -696,6 +696,7 @@ impl RpiCamera {
             // Allocate uninitialized storage to receive the converted image data.
             let num_pixels = width * height;
             let mut image_data = Vec::<u8>::with_capacity(num_pixels);
+            #[allow(clippy::uninit_vec)]
             unsafe { image_data.set_len(num_pixels) }
 
             if pisp_compressed {
@@ -851,7 +852,7 @@ impl RpiCamera {
         (frac * 100.0).ceil().clamp(0.0, 100.0) as i32
     }
 
-    async fn manage_worker_thread(&mut self) {
+    fn manage_worker_thread(&mut self) {
         // Has the worker terminated for some reason?
         if self.capture_thread.is_some() &&
             self.capture_thread.as_ref().unwrap().is_finished()
@@ -1062,7 +1063,7 @@ impl AbstractCamera for RpiCamera {
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
-        self.manage_worker_thread().await;
+        self.manage_worker_thread();
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
         loop {
@@ -1093,7 +1094,7 @@ impl AbstractCamera for RpiCamera {
         &mut self, prev_frame_id: Option<i32>)
         -> Result<Option<(CapturedImage, i32)>, CanonicalError>
     {
-        self.manage_worker_thread().await;
+        self.manage_worker_thread();
         // Get the most recently posted image; return none if there is none yet
         // or the currently posted image's frame id is the same as
         // `prev_frame_id`.

@@ -254,8 +254,8 @@ impl ASICamera {
             }  // state.lock().
 
             // Is it time to grab a frame?
-            if last_frame_time.is_some() {
-                let next_update_time = last_frame_time.unwrap() + update_interval;
+            if let Some(lft) = last_frame_time {
+                let next_update_time = lft + update_interval;
                 let now = Instant::now();
                 if next_update_time > now {
                     let delay = next_update_time - now;
@@ -272,6 +272,7 @@ impl ASICamera {
             // Allocate uninitialized storage to receive the image data.
             let num_pixels:usize = width * height;
             let mut image_data = Vec::<u8>::with_capacity(num_pixels);
+            #[allow(clippy::uninit_vec)]
             unsafe { image_data.set_len(num_pixels) }
             if let Err(e) = locked_sdk.get_video_data(
                 image_data.as_mut_ptr(), num_pixels as i64, /*wait_ms=*/2000) {
@@ -317,7 +318,7 @@ impl ASICamera {
         }
     }
 
-    async fn manage_worker_thread(&mut self) {
+    fn manage_worker_thread(&mut self) {
         // Has the worker terminated for some reason?
         if self.capture_thread.is_some() &&
             self.capture_thread.as_ref().unwrap().is_finished()
@@ -452,7 +453,7 @@ impl AbstractCamera for ASICamera {
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
-        self.manage_worker_thread().await;
+        self.manage_worker_thread();
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
         loop {
@@ -483,7 +484,7 @@ impl AbstractCamera for ASICamera {
         &mut self, prev_frame_id: Option<i32>)
         -> Result<Option<(CapturedImage, i32)>, CanonicalError>
     {
-        self.manage_worker_thread().await;
+        self.manage_worker_thread();
         // Get the most recently posted image; return None if there is none yet
         // or the currently posted image's frame id is the same as
         // `prev_frame_id`.
