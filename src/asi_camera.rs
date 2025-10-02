@@ -273,13 +273,15 @@ impl ASICamera {
             let num_pixels:usize = width * height;
             let mut image_data = Vec::<u8>::with_capacity(num_pixels);
             #[allow(clippy::uninit_vec)]
-            unsafe { image_data.set_len(num_pixels) }
-            if let Err(e) = locked_sdk.get_video_data(
-                image_data.as_mut_ptr(), num_pixels as i64, /*wait_ms=*/2000) {
-                warn!("Error getting video data: {:?}; resetting and retrying", e);
-                recover_camera = true;
-                continue;
-            }
+            unsafe {
+                image_data.set_len(num_pixels);
+                    if let Err(e) = locked_sdk.get_video_data(
+                        image_data.as_mut_ptr(), num_pixels as i64, /*wait_ms=*/2000) {
+                        warn!("Error getting video data: {:?}; resetting and retrying", e);
+                        recover_camera = true;
+                        continue;
+                    }
+                }
             if update_interval == Duration::ZERO {
                 state.lock().unwrap().eta = Some(Instant::now() + exp_duration);
             }
