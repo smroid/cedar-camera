@@ -615,7 +615,17 @@ impl RpiCamera {
             let metadata = req.metadata();
 
             last_frame_time = Some(Instant::now());
-            let readout_time = SystemTime::now();
+            // Use the sensor's hardware timestamp from metadata for accurate capture time.
+            // SensorTimestamp is in nanoseconds from the system's epoch.
+            let readout_time = metadata.get::<libcamera::controls::SensorTimestamp>()
+                .map(|libcamera::controls::SensorTimestamp(ns)| {
+                    SystemTime::UNIX_EPOCH + Duration::from_nanos(ns as u64)
+                })
+                .unwrap_or_else(|_| {
+                    // Fallback to current time if sensor timestamp unavailable
+                    warn!("SensorTimestamp not available in metadata, using SystemTime::now()");
+                    SystemTime::now()
+                });
 
             let width;
             let height;
@@ -865,13 +875,7 @@ impl RpiCamera {
             // Allocate a thread for concurrent execution of image acquisition
             // and uncompressing with other activities.
             self.capture_thread = Some(std::thread::spawn(move || {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .thread_name("rpi_camera")
-                    .build().unwrap();
-                runtime.block_on(async move {
-                    Self::worker(cloned_state);
-                });
+                Self::worker(cloned_state);
             }));
         }
     }
