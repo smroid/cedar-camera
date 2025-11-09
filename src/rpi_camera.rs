@@ -1,36 +1,43 @@
 // Copyright (c) 2025 Steven Rosenthal smr@dt3.org
 // See LICENSE file in root directory for license terms.
 
-use canonical_error::{CanonicalError, failed_precondition_error, unimplemented_error};
+use std::{
+    fs,
+    process::Command,
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    time::{Duration, Instant, SystemTime},
+};
 
 use async_trait::async_trait;
-
+use canonical_error::{
+    failed_precondition_error, unimplemented_error, CanonicalError,
+};
 use image::GrayImage;
-use log::{debug, info, warn};
-use std::fs;
-use std::process::Command;
-use std::sync::{Arc, OnceLock, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime};
-
 use libcamera::{
     camera::{Camera, CameraConfiguration, CameraConfigurationStatus},
     camera_manager::CameraManager,
     control::ControlList,
-    controls::{AnalogueGain, AeEnable, AwbEnable,
-               ExposureTime, NoiseReductionMode},
+    controls::{
+        AeEnable, AnalogueGain, AwbEnable, ExposureTime, NoiseReductionMode,
+    },
     framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
     framebuffer_map::MemoryMappedFrameBuffer,
     geometry,
     logging::{log_set_target, LoggingTarget},
     pixel_format::PixelFormat,
     properties,
-    request::{ReuseFlag},
+    request::ReuseFlag,
     stream::StreamRole,
 };
+use log::{debug, info, warn};
 
-use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
-                             EnumeratedCameraInfo, Gain, Offset};
-use crate::pisp_compression;
+use crate::{
+    abstract_camera::{
+        AbstractCamera, CaptureParams, CapturedImage, EnumeratedCameraInfo,
+        Gain, Offset,
+    },
+    pisp_compression,
+};
 
 pub type ConvertFn = fn(
     stride: usize,
@@ -45,7 +52,7 @@ pub type ConvertFn = fn(
 static CONVERT_FN: OnceLock<ConvertFn> = OnceLock::new();
 pub fn set_converter(func: ConvertFn) {
     log::info!("Setting raw image converter function.");
-    let _ = CONVERT_FN.set(func);  // Ignores error if already set.
+    let _ = CONVERT_FN.set(func); // Ignores error if already set.
 }
 
 pub struct RpiCamera {
@@ -65,7 +72,7 @@ pub struct RpiCamera {
 // State shared between capture thread and the RpiCamera methods.
 struct SharedState {
     model: String,
-    model_detail: Option<String>,  // dtoverlay params, if any.
+    model_detail: Option<String>, // dtoverlay params, if any.
 
     // Different models have different min/max analog gain.
     min_gain: i32,
@@ -78,8 +85,8 @@ struct SharedState {
     pisp_compressed: bool,
     pisp_compression_mode: i32,
 
-    // The next three fields are ignored if PiSP compression (previous field) is used.
-    // If neither is true, then it is 8 bits.
+    // The next three fields are ignored if PiSP compression (previous field)
+    // is used. If neither is true, then it is 8 bits.
     is_10_bit: bool,
     is_12_bit: bool,
 
@@ -124,10 +131,11 @@ impl RpiCamera {
             let model = props.get::<properties::Model>().unwrap();
             let cfgs = Self::get_camera_configs(&cam).unwrap();
             let stream_config = cfgs.get(0).unwrap();
-            answer.push(EnumeratedCameraInfo{
+            answer.push(EnumeratedCameraInfo {
                 model: model.to_string(),
                 width: stream_config.get_size().width,
-                height: stream_config.get_size().height})
+                height: stream_config.get_size().height,
+            })
         }
         answer
     }
@@ -144,89 +152,105 @@ impl RpiCamera {
         let model = props.get::<properties::Model>().unwrap();
         let width = stream_config.get_size().width as usize;
         let height = stream_config.get_size().height as usize;
-        let pixel_size_nanometers = match props.get::<properties::UnitCellSize>() {
+        let pixel_size_nanometers = match props
+            .get::<properties::UnitCellSize>()
+        {
             Ok(psn) => psn,
             Err(e) => {
                 // Some sensors are missing this static property.
                 if model.as_str() == "ov9281" {
-                    properties::UnitCellSize(geometry::Size{width: 3000,
-                                                            height: 3000})
+                    properties::UnitCellSize(geometry::Size {
+                        width: 3000,
+                        height: 3000,
+                    })
                 } else {
                     return Err(failed_precondition_error(
-                        format!("Missing properties::UnitCellSize: {:?}",
-                                e).as_str()));
+                        format!("Missing properties::UnitCellSize: {:?}", e)
+                            .as_str(),
+                    ));
                 }
-            },
+            }
         };
         let pixel_format = format!("{:?}", stream_config.get_pixel_format());
 
         let model_detail = match Self::extract_dtoverlay_config(
-            "/boot/firmware/config.txt", model.as_str()) {
+            "/boot/firmware/config.txt",
+            model.as_str(),
+        ) {
             Ok(md) => md,
             Err(e) => {
                 warn!("Error examining config.txt: {:?}", e);
                 None
-            },
+            }
         };
 
         // See https://git.libcamera.org/libcamera/libcamera.git/tree/src/libcamera/formats.cpp
         let pisp_compressed = pixel_format.contains("PISP_COMP");
-        let pisp_compression_mode =
-            if pisp_compressed {
-                match pixel_format.chars().last().unwrap() {
-                    '1' => 1,
-                    '2' => 2,
-                    '3' => 3,
-                    _ => panic!("Unexpected PiSP compression mode: {}", pixel_format),
+        let pisp_compression_mode = if pisp_compressed {
+            match pixel_format.chars().last().unwrap() {
+                '1' => 1,
+                '2' => 2,
+                '3' => 3,
+                _ => {
+                    panic!("Unexpected PiSP compression mode: {}", pixel_format)
                 }
-            } else {
-                0  // Don't care.
-            };
-        let is_12_bit = pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
-        let is_10_bit = pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
+            }
+        } else {
+            0 // Don't care.
+        };
+        let is_12_bit =
+            pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
+        let is_10_bit =
+            pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
         let is_packed = pixel_format.ends_with("_CSI2P");
-        let is_color =
-            if pisp_compressed {
-                !pixel_format.contains("MONO") && !pixel_format.contains("GREY") &&
-                !pixel_format.contains("Y")
-            } else {
-                // Bayer patterns (color): SRGGB, SGRBG, SGBRG, SBGGR.
-                // Monochrome patterns: Y8, Y10, Y12, GREY, MONO.
-                pixel_format.starts_with("S") && (
-                    pixel_format.contains("RGGB") ||
-                    pixel_format.contains("GRBG") ||
-                    pixel_format.contains("GBRG") ||
-                    pixel_format.contains("BGGR")
-                )
-            };
+        let is_color = if pisp_compressed {
+            !pixel_format.contains("MONO")
+                && !pixel_format.contains("GREY")
+                && !pixel_format.contains("Y")
+        } else {
+            // Bayer patterns (color): SRGGB, SGRBG, SGBRG, SBGGR.
+            // Monochrome patterns: Y8, Y10, Y12, GREY, MONO.
+            pixel_format.starts_with("S")
+                && (pixel_format.contains("RGGB")
+                    || pixel_format.contains("GRBG")
+                    || pixel_format.contains("GBRG")
+                    || pixel_format.contains("BGGR"))
+        };
 
         // Annoyingly, different Rpi cameras have different analog gain values.
         let min_gain = match model.as_str() {
-            "imx290" => 5,  // AKA imx462.
+            "imx290" => 5, // AKA imx462.
             _ => 1,
         };
         debug!("min_gain {}", min_gain);
         let max_gain = match model.as_str() {
             "imx477" => 22,
             "imx219" => 16,
-            "imx290" => 31,  // AKA imx462.
+            "imx290" => 31, // AKA imx462.
             "imx296" => 15,
             "ov5647" => 63,
             _ => 63,
         };
         debug!("max_gain {}", max_gain);
 
-        let mut cam = RpiCamera{
-            sensor_width: width as f32 * pixel_size_nanometers.width as f32 / 1000000.0,
-            sensor_height: height as f32 * pixel_size_nanometers.height as f32 / 1000000.0,
+        let mut cam = RpiCamera {
+            sensor_width: width as f32 * pixel_size_nanometers.width as f32
+                / 1000000.0,
+            sensor_height: height as f32 * pixel_size_nanometers.height as f32
+                / 1000000.0,
             is_color,
-            state: Arc::new(Mutex::new(SharedState{
+            state: Arc::new(Mutex::new(SharedState {
                 model: model.to_string(),
                 model_detail,
-                min_gain, max_gain,
-                width, height,
-                pisp_compressed, pisp_compression_mode,
-                is_10_bit, is_12_bit, is_packed,
+                min_gain,
+                max_gain,
+                width,
+                height,
+                pisp_compressed,
+                pisp_compression_mode,
+                is_10_bit,
+                is_12_bit,
+                is_packed,
                 camera_settings: CaptureParams::new(),
                 setting_changed: false,
                 update_interval: Duration::ZERO,
@@ -245,9 +269,9 @@ impl RpiCamera {
         Ok(cam)
     }
 
-    fn get_camera_configs(cam: &Camera)
-                          -> Result<CameraConfiguration, CanonicalError>
-    {
+    fn get_camera_configs(
+        cam: &Camera,
+    ) -> Result<CameraConfiguration, CanonicalError> {
         // This will generate default configuration for Raw.
         let mut cfgs = cam.generate_configuration(&[StreamRole::Raw]).unwrap();
         let stream_config = cfgs.get(0).unwrap();
@@ -264,9 +288,11 @@ impl RpiCamera {
         // First pass: look for 8-bit format (most efficient).
         for format in &all_formats {
             let pix_fmt = format!("{:?}", format);
-            if pix_fmt.contains("8") &&
-               (pix_fmt.contains("RGGB") || pix_fmt.contains("GREY") ||
-                pix_fmt.contains("Y8") || pix_fmt.contains("8_CSI2P"))
+            if pix_fmt.contains("8")
+                && (pix_fmt.contains("RGGB")
+                    || pix_fmt.contains("GREY")
+                    || pix_fmt.contains("Y8")
+                    || pix_fmt.contains("8_CSI2P"))
             {
                 preferred_format = Some(*format);
                 format_type = "8-bit";
@@ -277,9 +303,11 @@ impl RpiCamera {
         if preferred_format.is_none() {
             for format in &all_formats {
                 let pix_fmt = format!("{:?}", format);
-                if pix_fmt.contains("10") &&
-                   (pix_fmt.contains("RGGB") || pix_fmt.contains("GREY") ||
-                    pix_fmt.contains("Y10") || pix_fmt.contains("10_CSI2P"))
+                if pix_fmt.contains("10")
+                    && (pix_fmt.contains("RGGB")
+                        || pix_fmt.contains("GREY")
+                        || pix_fmt.contains("Y10")
+                        || pix_fmt.contains("10_CSI2P"))
                 {
                     preferred_format = Some(*format);
                     format_type = "10-bit";
@@ -295,30 +323,40 @@ impl RpiCamera {
             match cfgs.validate() {
                 CameraConfigurationStatus::Valid => {
                     // Success - no logging needed in normal case.
-                },
+                }
                 CameraConfigurationStatus::Adjusted => {
                     debug!("Camera configuration was adjusted: {:#?}", cfgs);
-                },
+                }
                 CameraConfigurationStatus::Invalid => {
                     // Fallback to original format if preferred format not
                     // supported.
-                    warn!("{} format rejected, listing available formats:",
-                          format_type);
+                    warn!(
+                        "{} format rejected, listing available formats:",
+                        format_type
+                    );
                     for format in &all_formats {
                         warn!("  {:?}", format);
                     }
                     cfgs.get_mut(0).unwrap().set_pixel_format(original_format);
                     match cfgs.validate() {
-                        CameraConfigurationStatus::Valid | CameraConfigurationStatus::Adjusted => {
-                            warn!("Using fallback format: {:?}", original_format);
-                        },
+                        CameraConfigurationStatus::Valid
+                        | CameraConfigurationStatus::Adjusted => {
+                            warn!(
+                                "Using fallback format: {:?}",
+                                original_format
+                            );
+                        }
                         CameraConfigurationStatus::Invalid => {
                             return Err(failed_precondition_error(
-                                format!("Camera configuration was rejected: {:#?}",
-                                        cfgs).as_str()));
-                        },
+                                format!(
+                                    "Camera configuration was rejected: {:#?}",
+                                    cfgs
+                                )
+                                .as_str(),
+                            ));
+                        }
                     }
-                },
+                }
             }
         } else {
             // No preferred format found - list all available formats.
@@ -332,35 +370,49 @@ impl RpiCamera {
                 CameraConfigurationStatus::Valid => (),
                 CameraConfigurationStatus::Adjusted => {
                     debug!("Camera configuration was adjusted: {:#?}", cfgs);
-                },
+                }
                 CameraConfigurationStatus::Invalid => {
                     return Err(failed_precondition_error(
-                        format!("Camera configuration was rejected: {:#?}",
-                                cfgs).as_str()));
-                },
+                        format!(
+                            "Camera configuration was rejected: {:#?}",
+                            cfgs
+                        )
+                        .as_str(),
+                    ));
+                }
             }
         }
         Ok(cfgs)
     }
 
     // This function is called whenever a camera setting is changed. The most
-    // recently captured image is invalidated, and the next call to capture_image()
-    // will wait for the setting change to be reflected in the captured image
-    // stream.
+    // recently captured image is invalidated, and the next call to
+    // capture_image() will wait for the setting change to be reflected in
+    // the captured image stream.
     fn changed_setting(locked_state: &mut MutexGuard<SharedState>) {
         locked_state.setting_changed = true;
         locked_state.most_recent_capture = None;
     }
 
-    fn setup_camera_request(controls: &mut ControlList, state: &MutexGuard<SharedState>) {
+    fn setup_camera_request(
+        controls: &mut ControlList,
+        state: &MutexGuard<SharedState>,
+    ) {
         let settings = &state.camera_settings;
         let exp_duration_micros = settings.exposure_duration.as_micros();
         let abstract_gain = settings.gain.value();
         controls.set(AeEnable(false)).unwrap();
         controls.set(AwbEnable(false)).unwrap();
-        controls.set(ExposureTime(exp_duration_micros as i32)).unwrap();
-        controls.set(AnalogueGain(Self::cam_gain(
-            abstract_gain, state.min_gain, state.max_gain))).unwrap();
+        controls
+            .set(ExposureTime(exp_duration_micros as i32))
+            .unwrap();
+        controls
+            .set(AnalogueGain(Self::cam_gain(
+                abstract_gain,
+                state.min_gain,
+                state.max_gain,
+            )))
+            .unwrap();
         controls.set(NoiseReductionMode::Off).unwrap();
     }
 
@@ -374,30 +426,34 @@ impl RpiCamera {
     // * It is fast.
     // * It allows CedarDetect's hot pixel detection to work effectively.
     // * Star images are only weakly colored anyway.
-    // * CedarDetect usually does 2x2 binning prior to running its star detection
-    //   algorithm, so the R/G/B values are roughly converted to luma in the
-    //   binning process.
-    fn convert_to_8bit(stride: usize,
-                       buf_data: &[u8],
-                       image_data: &mut [u8],
-                       width: usize,
-                       height: usize,
-                       is_10_bit: bool,
-                       is_12_bit: bool,
-                       is_packed: bool) {
+    // * CedarDetect usually does 2x2 binning prior to running its star
+    //   detection algorithm, so the R/G/B values are roughly converted to luma
+    //   in the binning process.
+    fn convert_to_8bit(
+        stride: usize,
+        buf_data: &[u8],
+        image_data: &mut [u8],
+        width: usize,
+        height: usize,
+        is_10_bit: bool,
+        is_12_bit: bool,
+        is_packed: bool,
+    ) {
         // Handle 8-bit format: no conversion needed, direct copy.
         if !is_10_bit && !is_12_bit {
             // For 8-bit, stride should equal width (1 byte per pixel).
             if stride == width {
                 // Simple copy for contiguous data.
-                image_data[..width * height].copy_from_slice(&buf_data[..width * height]);
+                image_data[..width * height]
+                    .copy_from_slice(&buf_data[..width * height]);
             } else {
                 // Copy row by row if there's stride padding.
                 for row in 0..height {
                     let src_start = row * stride;
                     let dst_start = row * width;
-                    image_data[dst_start..dst_start + width]
-                        .copy_from_slice(&buf_data[src_start..src_start + width]);
+                    image_data[dst_start..dst_start + width].copy_from_slice(
+                        &buf_data[src_start..src_start + width],
+                    );
                 }
             }
             return;
@@ -405,8 +461,10 @@ impl RpiCamera {
 
         // Use optimized function if we have one.
         if let Some(f) = CONVERT_FN.get() {
-            f(stride, buf_data, image_data, width, height,
-              is_10_bit, is_12_bit, is_packed);
+            f(
+                stride, buf_data, image_data, width, height, is_10_bit,
+                is_12_bit, is_packed,
+            );
             return;
         }
         if !is_packed {
@@ -416,12 +474,14 @@ impl RpiCamera {
             // Convert from packed 10 bit to 8 bit.
             for row in 0..height {
                 let buf_row_start = row * stride;
-                let buf_row_end = buf_row_start + width*5/4;
+                let buf_row_end = buf_row_start + width * 5 / 4;
                 let pix_row_start = row * width;
                 let pix_row_end = pix_row_start + width;
-                for (buf_chunk, pix_chunk)
-                    in buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
-                        image_data[pix_row_start..pix_row_end].chunks_exact_mut(4))
+                for (buf_chunk, pix_chunk) in
+                    buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
+                        image_data[pix_row_start..pix_row_end]
+                            .chunks_exact_mut(4),
+                    )
                 {
                     // Keep upper 8 bits; discard 2 lsb.
                     let pix0 = buf_chunk[0];
@@ -441,12 +501,14 @@ impl RpiCamera {
             // Convert from packed 12 bit to 8 bit.
             for row in 0..height {
                 let buf_row_start = row * stride;
-                let buf_row_end = buf_row_start + width*3/2;
+                let buf_row_end = buf_row_start + width * 3 / 2;
                 let pix_row_start = row * width;
                 let pix_row_end = pix_row_start + width;
-                for (buf_chunk, pix_pair)
-                    in buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
-                        image_data[pix_row_start..pix_row_end].chunks_exact_mut(2))
+                for (buf_chunk, pix_pair) in
+                    buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
+                        image_data[pix_row_start..pix_row_end]
+                            .chunks_exact_mut(2),
+                    )
                 {
                     // Keep upper 8 bits; discard 4 lsb.
                     let pix0 = buf_chunk[0];
@@ -469,8 +531,8 @@ impl RpiCamera {
         // started. We need to mark dirty a number of images after a setting
         // change.
         let pipeline_depth = match state.lock().unwrap().model.as_str() {
-            // These values are determined empirically by using the exposure_sweep
-            // test program.
+            // These values are determined empirically by using the
+            // exposure_sweep test program.
             "imx477" => 6,
             "imx219" => 4,
             "imx290" => 5,
@@ -484,16 +546,17 @@ impl RpiCamera {
         let mut mark_image_count = 0;
         let mgr = CameraManager::new().unwrap();
 
-        // Setting AeEnable(false) in setup_camera_request causes the libcamera C
-        // implementation to log spurious warnings. I was unable to set the log
-        // level to Error, so just turn off libcamera's logging for now.
+        // Setting AeEnable(false) in setup_camera_request causes the libcamera
+        // C implementation to log spurious warnings. I was unable to
+        // set the log level to Error, so just turn off libcamera's
+        // logging for now.
         log_set_target(LoggingTarget::None).unwrap();
         let cameras = mgr.cameras();
         let cam = cameras.get(0).expect("No cameras found");
         let mut active_cam = cam.acquire().expect("Failed to acquire camera");
 
-        let mut cfgs = Self::get_camera_configs(&cam).expect(
-            "Failed to get camera configs in worker");
+        let mut cfgs = Self::get_camera_configs(&cam)
+            .expect("Failed to get camera configs in worker");
 
         // Increase buffer count by 1 to allow re-queueing before processing
         // completes.
@@ -503,7 +566,9 @@ impl RpiCamera {
             cfg.set_buffer_count(original_buffer_count + 1);
         }
 
-        active_cam.configure(&mut cfgs).expect("Failed to configure camera");
+        active_cam
+            .configure(&mut cfgs)
+            .expect("Failed to configure camera");
         let cfg = cfgs.get(0).unwrap();
         let stride = cfg.get_stride() as usize;
 
@@ -550,8 +615,9 @@ impl RpiCamera {
         // Enqueue all but one request to the camera, holding back one for
         // immediate re-queueing.
         active_cam.start(None).unwrap();
-        let spare_request = reqs.pop().expect(
-            "Need at least one buffer for spare request");
+        let spare_request = reqs
+            .pop()
+            .expect("Need at least one buffer for spare request");
         for req in reqs {
             active_cam.queue_request(req).unwrap();
         }
@@ -586,7 +652,7 @@ impl RpiCamera {
                         // Request will be dropped here, releasing its buffer.
                     }
                     locked_state.stop_request = false;
-                    return;  // Exit thread.
+                    return; // Exit thread.
                 }
             }
 
@@ -605,18 +671,19 @@ impl RpiCamera {
                 Ok(req) => req,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     warn!("Camera request timeout - checking for stop request");
-                    continue;  // Check stop_request in next loop iteration.
-                },
+                    continue; // Check stop_request in next loop iteration.
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     warn!("Camera request channel disconnected");
-                    break;  // Exit loop and cleanup.
-                },
+                    break; // Exit loop and cleanup.
+                }
             };
             let metadata = req.metadata();
 
             last_frame_time = Some(Instant::now());
-            // Use the sensor's hardware timestamp from metadata for accurate capture time.
-            // SensorTimestamp is in nanoseconds from the system's epoch.
+            // Use the sensor's hardware timestamp from metadata for accurate
+            // capture time. SensorTimestamp is in nanoseconds from
+            // the system's epoch.
             let readout_time = metadata.get::<libcamera::controls::SensorTimestamp>()
                 .map(|libcamera::controls::SensorTimestamp(ns)| {
                     SystemTime::UNIX_EPOCH + Duration::from_nanos(ns as u64)
@@ -638,12 +705,21 @@ impl RpiCamera {
             let actual_abstract_gain;
             {
                 let mut locked_state = state.lock().unwrap();
-                actual_exposure_duration = metadata.get::<ExposureTime>()
-                    .map(|ExposureTime(exp_us)| Duration::from_micros(exp_us as u64))
+                actual_exposure_duration = metadata
+                    .get::<ExposureTime>()
+                    .map(|ExposureTime(exp_us)| {
+                        Duration::from_micros(exp_us as u64)
+                    })
                     .ok();
-                actual_abstract_gain = metadata.get::<AnalogueGain>()
-                    .map(|AnalogueGain(gain)| Self::abstract_gain(
-                        gain, locked_state.min_gain, locked_state.max_gain))
+                actual_abstract_gain = metadata
+                    .get::<AnalogueGain>()
+                    .map(|AnalogueGain(gain)| {
+                        Self::abstract_gain(
+                            gain,
+                            locked_state.min_gain,
+                            locked_state.max_gain,
+                        )
+                    })
                     .ok();
                 width = locked_state.width;
                 height = locked_state.height;
@@ -657,8 +733,8 @@ impl RpiCamera {
                     locked_state.setting_changed = false;
 
                     // Handle HCG mode changes for IMX290.
-                    if locked_state.hcg_needs_reinit &&
-                       !locked_state.hcg_draining_pipeline
+                    if locked_state.hcg_needs_reinit
+                        && !locked_state.hcg_draining_pipeline
                     {
                         debug!("Starting pipeline drain for HCG mode change");
                         locked_state.hcg_draining_pipeline = true;
@@ -703,21 +779,39 @@ impl RpiCamera {
                 }
             }
 
-            // Allocate uninitialized storage to receive the converted image data.
+            // Allocate uninitialized storage to receive the converted image
+            // data.
             let num_pixels = width * height;
             let mut image_data = Vec::<u8>::with_capacity(num_pixels);
             #[allow(clippy::uninit_vec)]
-            unsafe { image_data.set_len(num_pixels) }
+            unsafe {
+                image_data.set_len(num_pixels)
+            }
 
             if pisp_compressed {
-                pisp_compression::uncompress(stride, buf_data, &mut image_data,
-                                             width, height, pisp_compression_mode);
+                pisp_compression::uncompress(
+                    stride,
+                    buf_data,
+                    &mut image_data,
+                    width,
+                    height,
+                    pisp_compression_mode,
+                );
             } else {
-                Self::convert_to_8bit(stride, buf_data, &mut image_data,
-                                      width, height, is_10_bit, is_12_bit, is_packed);
+                Self::convert_to_8bit(
+                    stride,
+                    buf_data,
+                    &mut image_data,
+                    width,
+                    height,
+                    is_10_bit,
+                    is_12_bit,
+                    is_packed,
+                );
             }
-            let image = GrayImage::from_raw(
-                width as u32, height as u32, image_data).unwrap();
+            let image =
+                GrayImage::from_raw(width as u32, height as u32, image_data)
+                    .unwrap();
             // Empirically I have seen that there's a transfer time from the
             // camera that is not captured in the measured processing_duration.
             // Apply a fudge factor for the transfer time.
@@ -764,8 +858,10 @@ impl RpiCamera {
                     if let Err(e) = Self::set_hcg_mode(hcg_enabled) {
                         log::error!("Failed to set IMX290 HCG mode: {}", e);
                     } else {
-                        log::info!("Successfully set IMX290 HCG mode to: {}",
-                                   hcg_enabled);
+                        log::info!(
+                            "Successfully set IMX290 HCG mode to: {}",
+                            hcg_enabled
+                        );
                     }
                     // Wait for HCG change to settle.
                     std::thread::sleep(Duration::from_millis(50));
@@ -773,15 +869,20 @@ impl RpiCamera {
                     // Restart camera.
                     debug!("Restarting camera after HCG mode change");
                     if let Err(e) = active_cam.start(None) {
-                        warn!("Error restarting camera after HCG change: {:?}", e);
+                        warn!(
+                            "Error restarting camera after HCG change: {:?}",
+                            e
+                        );
                     }
                     // Apply HCG change again after camera restart in case
                     // active_cam.start() reset sensor registers.
                     if let Err(e) = Self::set_hcg_mode(hcg_enabled) {
                         log::error!("Failed to re-apply IMX290 HCG mode after start: {}", e);
                     } else {
-                        log::debug!("Re-applied IMX290 HCG mode after start: {}",
-                                    hcg_enabled);
+                        log::debug!(
+                            "Re-applied IMX290 HCG mode after start: {}",
+                            hcg_enabled
+                        );
                     }
                     // Brief delay for the second HCG change to settle before
                     // resuming capture.
@@ -789,10 +890,13 @@ impl RpiCamera {
 
                     // Re-queue all collected requests.
                     let num_collected = collected_requests.len();
-                    debug!("Re-queueing {} collected requests after restart",
-                           num_collected);
+                    debug!(
+                        "Re-queueing {} collected requests after restart",
+                        num_collected
+                    );
                     for collected_req in collected_requests.drain(..) {
-                        if let Err(e) = active_cam.queue_request(collected_req) {
+                        if let Err(e) = active_cam.queue_request(collected_req)
+                        {
                             warn!("Failed to re-queue collected request after restart: {:?}", e);
                             break;
                         }
@@ -818,8 +922,12 @@ impl RpiCamera {
             if !locked_state.setting_changed {
                 locked_state.most_recent_capture = Some(CapturedImage {
                     capture_params: CaptureParams {
-                        exposure_duration: actual_exposure_duration.unwrap_or(locked_state.camera_settings.exposure_duration),
-                        gain: Gain::new(actual_abstract_gain.unwrap_or(locked_state.camera_settings.gain.value())),
+                        exposure_duration: actual_exposure_duration.unwrap_or(
+                            locked_state.camera_settings.exposure_duration,
+                        ),
+                        gain: Gain::new(actual_abstract_gain.unwrap_or(
+                            locked_state.camera_settings.gain.value(),
+                        )),
                         offset: locked_state.camera_settings.offset,
                     },
                     params_accurate: mark_image_count == 0,
@@ -834,29 +942,40 @@ impl RpiCamera {
                 let now = Instant::now();
                 if update_interval == Duration::ZERO {
                     locked_state.eta = Some(
-                        now + actual_exposure_duration.unwrap_or(locked_state.camera_settings.exposure_duration));
+                        now + actual_exposure_duration.unwrap_or(
+                            locked_state.camera_settings.exposure_duration,
+                        ),
+                    );
                 } else {
                     locked_state.eta = Some(now + update_interval);
                 }
             }
-        }  // loop.
-        // Fallback cleanup if loop exits unexpectedly.
+        } // loop.
+          // Fallback cleanup if loop exits unexpectedly.
         warn!("Worker loop exited unexpectedly, performing cleanup");
         if let Err(e) = active_cam.stop() {
             warn!("Error in fallback camera stop: {:?}", e);
         }
-        while rx.try_recv().is_ok() {}  // Drain channel.
-    }  // worker().
+        while rx.try_recv().is_ok() {} // Drain channel.
+    } // worker().
 
     // Translate our 0..100 into the camera min/max range for analog gain.
-    fn cam_gain(abstract_gain: i32, cam_min_gain: i32, cam_max_gain: i32) -> f32 {
+    fn cam_gain(
+        abstract_gain: i32,
+        cam_min_gain: i32,
+        cam_max_gain: i32,
+    ) -> f32 {
         let frac = abstract_gain as f64 / 100.0;
         let cmg = cam_min_gain as f64;
         (cmg + (cam_max_gain as f64 - cmg) * frac) as f32
     }
 
     // Translate camera analog gain to our 0..100 abstract gain.
-    fn abstract_gain(cam_gain: f32, cam_min_gain: i32, cam_max_gain: i32) -> i32 {
+    fn abstract_gain(
+        cam_gain: f32,
+        cam_min_gain: i32,
+        cam_max_gain: i32,
+    ) -> i32 {
         let cmg = cam_min_gain as f64;
         let frac = (cam_gain as f64 - cmg) / (cam_max_gain as f64 - cmg);
         (frac * 100.0).ceil().clamp(0.0, 100.0) as i32
@@ -864,8 +983,8 @@ impl RpiCamera {
 
     fn manage_worker_thread(&mut self) {
         // Has the worker terminated for some reason?
-        if self.capture_thread.is_some() &&
-            self.capture_thread.as_ref().unwrap().is_finished()
+        if self.capture_thread.is_some()
+            && self.capture_thread.as_ref().unwrap().is_finished()
         {
             self.capture_thread.take().unwrap();
         }
@@ -889,7 +1008,15 @@ impl RpiCamera {
         let bus = Self::find_imx290_bus()?;
         let value = if enable { "0x11" } else { "0x01" };
         let output = Command::new("i2ctransfer")
-            .args(["-f", "-y", &bus.to_string(), "w3@0x1a", "0x30", "0x09", value])
+            .args([
+                "-f",
+                "-y",
+                &bus.to_string(),
+                "w3@0x1a",
+                "0x30",
+                "0x09",
+                value,
+            ])
             .output()?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
@@ -901,9 +1028,7 @@ impl RpiCamera {
 
     fn ensure_i2c_access() -> bool {
         // Test if we can access I2C.
-        let test_result = Command::new("i2cdetect")
-            .args(["-y", "1"])
-            .output();
+        let test_result = Command::new("i2cdetect").args(["-y", "1"]).output();
         match test_result {
             Ok(output) if output.status.success() => true,
             Ok(output) => {
@@ -917,7 +1042,7 @@ impl RpiCamera {
                     log::warn!("I2C error: {}", stderr);
                 }
                 false
-            },
+            }
             Err(e) => {
                 log::warn!("Failed to run i2cdetect: {:?}", e);
                 false
@@ -940,7 +1065,15 @@ impl RpiCamera {
     fn test_imx290_on_bus(bus: u8) -> Result<bool, Box<dyn std::error::Error>> {
         // Try to read a known register (0x3009) from IMX290.
         let output = Command::new("i2ctransfer")
-            .args(["-f", "-y", &bus.to_string(), "w2@0x1a", "0x30", "0x09", "r1"])
+            .args([
+                "-f",
+                "-y",
+                &bus.to_string(),
+                "w2@0x1a",
+                "0x30",
+                "0x09",
+                "r1",
+            ])
             .output()?;
         // If command succeeds and returns data, sensor is present.
         if output.status.success() && !output.stdout.is_empty() {
@@ -951,13 +1084,16 @@ impl RpiCamera {
         Ok(false)
     }
 
-
-    fn extract_dtoverlay_config(file_path: &str, overlay_name: &str)
-                                -> Result<Option<String>, std::io::Error> {
+    fn extract_dtoverlay_config(
+        file_path: &str,
+        overlay_name: &str,
+    ) -> Result<Option<String>, std::io::Error> {
         let content = fs::read_to_string(file_path)?;
         for line in content.lines() {
             let trimmed = line.trim();
-            if let Some(config) = Self::parse_dtoverlay_line(trimmed, overlay_name) {
+            if let Some(config) =
+                Self::parse_dtoverlay_line(trimmed, overlay_name)
+            {
                 return Ok(Some(config));
             }
         }
@@ -972,7 +1108,7 @@ impl RpiCamera {
         }
         None
     }
-}  // impl RpiCamera.
+} // impl RpiCamera.
 
 /// We arrange to call stop() when RpiCamera object goes out of scope.
 impl Drop for RpiCamera {
@@ -1010,8 +1146,10 @@ impl AbstractCamera for RpiCamera {
         Gain::new(100)
     }
 
-    fn set_exposure_duration(&mut self, exp_duration: Duration)
-                             -> Result<(), CanonicalError> {
+    fn set_exposure_duration(
+        &mut self,
+        exp_duration: Duration,
+    ) -> Result<(), CanonicalError> {
         let mut locked_state = self.state.lock().unwrap();
         if locked_state.camera_settings.exposure_duration != exp_duration {
             RpiCamera::changed_setting(&mut locked_state);
@@ -1031,8 +1169,11 @@ impl AbstractCamera for RpiCamera {
         if locked_state.model == "imx290" {
             let should_enable_hcg = gain.value() >= 50;
             if locked_state.hcg_enabled != should_enable_hcg {
-                log::debug!("Switching IMX290 HCG mode: {} -> {}",
-                            locked_state.hcg_enabled, should_enable_hcg);
+                log::debug!(
+                    "Switching IMX290 HCG mode: {} -> {}",
+                    locked_state.hcg_enabled,
+                    should_enable_hcg
+                );
                 locked_state.hcg_enabled = should_enable_hcg;
                 locked_state.hcg_needs_reinit = true;
                 RpiCamera::changed_setting(&mut locked_state);
@@ -1052,21 +1193,26 @@ impl AbstractCamera for RpiCamera {
 
     fn set_offset(&mut self, _offset: Offset) -> Result<(), CanonicalError> {
         Err(unimplemented_error(
-            format!("Offset not supported for {}", self.model()).as_str()))
+            format!("Offset not supported for {}", self.model()).as_str(),
+        ))
     }
     fn get_offset(&self) -> Offset {
         Offset::new(0)
     }
 
-    fn set_update_interval(&mut self, update_interval: Duration)
-                           -> Result<(), CanonicalError> {
+    fn set_update_interval(
+        &mut self,
+        update_interval: Duration,
+    ) -> Result<(), CanonicalError> {
         let mut locked_state = self.state.lock().unwrap();
         locked_state.update_interval = update_interval;
         Ok(())
     }
 
-    async fn capture_image(&mut self, prev_frame_id: Option<i32>)
-                           -> Result<(CapturedImage, i32), CanonicalError> {
+    async fn capture_image(
+        &mut self,
+        prev_frame_id: Option<i32>,
+    ) -> Result<(CapturedImage, i32), CanonicalError> {
         self.manage_worker_thread();
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
@@ -1074,17 +1220,21 @@ impl AbstractCamera for RpiCamera {
             let mut sleep_duration = Duration::from_millis(1);
             {
                 let locked_state = self.state.lock().unwrap();
-                if locked_state.most_recent_capture.is_some() &&
-                    (prev_frame_id.is_none() ||
-                     prev_frame_id.unwrap() != locked_state.frame_id)
+                if locked_state.most_recent_capture.is_some()
+                    && (prev_frame_id.is_none()
+                        || prev_frame_id.unwrap() != locked_state.frame_id)
                 {
                     // Don't consume it, other clients may want it.
-                    return Ok((locked_state.most_recent_capture.clone().unwrap(),
-                               locked_state.frame_id));
+                    return Ok((
+                        locked_state.most_recent_capture.clone().unwrap(),
+                        locked_state.frame_id,
+                    ));
                 }
                 if locked_state.eta.is_some() {
-                    let time_to_eta =
-                        locked_state.eta.unwrap().saturating_duration_since(Instant::now());
+                    let time_to_eta = locked_state
+                        .eta
+                        .unwrap()
+                        .saturating_duration_since(Instant::now());
                     if time_to_eta > sleep_duration {
                         sleep_duration = time_to_eta;
                     }
@@ -1095,34 +1245,41 @@ impl AbstractCamera for RpiCamera {
     }
 
     async fn try_capture_image(
-        &mut self, prev_frame_id: Option<i32>)
-        -> Result<Option<(CapturedImage, i32)>, CanonicalError>
-    {
+        &mut self,
+        prev_frame_id: Option<i32>,
+    ) -> Result<Option<(CapturedImage, i32)>, CanonicalError> {
         self.manage_worker_thread();
         // Get the most recently posted image; return none if there is none yet
         // or the currently posted image's frame id is the same as
         // `prev_frame_id`.
         let locked_state = self.state.lock().unwrap();
-        if locked_state.most_recent_capture.is_some() &&
-            (prev_frame_id.is_none() ||
-             prev_frame_id.unwrap() != locked_state.frame_id)
+        if locked_state.most_recent_capture.is_some()
+            && (prev_frame_id.is_none()
+                || prev_frame_id.unwrap() != locked_state.frame_id)
         {
             // Don't consume it, other clients may want it.
-            return Ok(Some((locked_state.most_recent_capture.clone().unwrap(),
-                            locked_state.frame_id)));
+            return Ok(Some((
+                locked_state.most_recent_capture.clone().unwrap(),
+                locked_state.frame_id,
+            )));
         }
         Ok(None)
     }
 
     fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
         let locked_state = self.state.lock().unwrap();
-        if locked_state.most_recent_capture.is_some() &&
-            (prev_frame_id.is_none() ||
-             prev_frame_id.unwrap() != locked_state.frame_id)
+        if locked_state.most_recent_capture.is_some()
+            && (prev_frame_id.is_none()
+                || prev_frame_id.unwrap() != locked_state.frame_id)
         {
             Some(Duration::ZERO)
         } else if locked_state.eta.is_some() {
-            Some(locked_state.eta.unwrap().saturating_duration_since(Instant::now()))
+            Some(
+                locked_state
+                    .eta
+                    .unwrap()
+                    .saturating_duration_since(Instant::now()),
+            )
         } else {
             None
         }
