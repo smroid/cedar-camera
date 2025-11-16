@@ -683,20 +683,23 @@ impl RpiCamera {
             let metadata = req.metadata();
 
             last_frame_time = Some(Instant::now());
+            let readout_time = SystemTime::now();
+
+            // TODO: drop this.
             // Use the sensor's hardware timestamp from metadata for accurate
             // capture time. SensorTimestamp is in nanoseconds since system boot.
             // Calculate boot_time dynamically to handle system time changes
             // (e.g., NTP sync).
-            let boot_time = Self::calculate_boot_time();
-            let readout_time = metadata.get::<libcamera::controls::SensorTimestamp>()
-                .map(|libcamera::controls::SensorTimestamp(ns)| {
-                    boot_time + Duration::from_nanos(ns as u64)
-                })
-                .unwrap_or_else(|_| {
-                    // Fallback to current time if sensor timestamp unavailable
-                    warn!("SensorTimestamp not available in metadata, using SystemTime::now()");
-                    SystemTime::now()
-                });
+            // let boot_time = Self::calculate_boot_time();
+            // let readout_time = metadata.get::<libcamera::controls::SensorTimestamp>()
+            //     .map(|libcamera::controls::SensorTimestamp(ns)| {
+            //         boot_time + Duration::from_nanos(ns as u64)
+            //     })
+            //     .unwrap_or_else(|_| {
+            //         // Fallback to current time if sensor timestamp unavailable
+            //         warn!("SensorTimestamp not available in metadata, using SystemTime::now()");
+            //         SystemTime::now()
+            //     });
 
             let width;
             let height;
