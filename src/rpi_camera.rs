@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use libc::{clock_gettime, timespec, CLOCK_BOOTTIME, CLOCK_REALTIME};
+// use libc::{clock_gettime, timespec, CLOCK_BOOTTIME, CLOCK_REALTIME};
 
 use async_trait::async_trait;
 use canonical_error::{
@@ -1120,32 +1120,32 @@ impl RpiCamera {
     // Sensor timestamps are relative to boot, so we need to convert them to
     // absolute SystemTime by adding to boot_time. CLOCK_BOOTTIME is the same
     // clock that sensor timestamps are relative to.
-    fn calculate_boot_time() -> SystemTime {
-        unsafe {
-            let mut realtime_ts: timespec = std::mem::zeroed();
-            let mut boottime_ts: timespec = std::mem::zeroed();
+    // fn calculate_boot_time() -> SystemTime {
+    //     unsafe {
+    //         let mut realtime_ts: timespec = std::mem::zeroed();
+    //         let mut boottime_ts: timespec = std::mem::zeroed();
 
-            // Read both clocks with minimal delay between them.
-            let ret_realtime = clock_gettime(CLOCK_REALTIME, &mut realtime_ts);
-            let ret_boottime = clock_gettime(CLOCK_BOOTTIME, &mut boottime_ts);
-            if ret_realtime == 0 && ret_boottime == 0 {
-                // Convert to durations.
-                let realtime = Duration::new(realtime_ts.tv_sec as u64, realtime_ts.tv_nsec as u32);
-                let boottime = Duration::new(boottime_ts.tv_sec as u64, boottime_ts.tv_nsec as u32);
+    //         // Read both clocks with minimal delay between them.
+    //         let ret_realtime = clock_gettime(CLOCK_REALTIME, &mut realtime_ts);
+    //         let ret_boottime = clock_gettime(CLOCK_BOOTTIME, &mut boottime_ts);
+    //         if ret_realtime == 0 && ret_boottime == 0 {
+    //             // Convert to durations.
+    //             let realtime = Duration::new(realtime_ts.tv_sec as u64, realtime_ts.tv_nsec as u32);
+    //             let boottime = Duration::new(boottime_ts.tv_sec as u64, boottime_ts.tv_nsec as u32);
 
-                // Boot time = CLOCK_REALTIME - CLOCK_BOOTTIME.
-                if let Some(boot_time) = realtime.checked_sub(boottime) {
-                    // Convert back to SystemTime (UNIX_EPOCH + duration).
-                    let boot_time_systemtime = SystemTime::UNIX_EPOCH + boot_time;
-                    debug!("Calculated boot_time using CLOCK_REALTIME - CLOCK_BOOTTIME: {:?}", boot_time_systemtime);
-                    return boot_time_systemtime;
-                }
-            }
-        }
-        // Fallback: use current time (not ideal but better than way-off values).
-        warn!("Using fallback boot_time (current SystemTime::now())");
-        SystemTime::now()
-    }
+    //             // Boot time = CLOCK_REALTIME - CLOCK_BOOTTIME.
+    //             if let Some(boot_time) = realtime.checked_sub(boottime) {
+    //                 // Convert back to SystemTime (UNIX_EPOCH + duration).
+    //                 let boot_time_systemtime = SystemTime::UNIX_EPOCH + boot_time;
+    //                 debug!("Calculated boot_time using CLOCK_REALTIME - CLOCK_BOOTTIME: {:?}", boot_time_systemtime);
+    //                 return boot_time_systemtime;
+    //             }
+    //         }
+    //     }
+    //     // Fallback: use current time (not ideal but better than way-off values).
+    //     warn!("Using fallback boot_time (current SystemTime::now())");
+    //     SystemTime::now()
+    // }
 } // impl RpiCamera.
 
 /// We arrange to call stop() when RpiCamera object goes out of scope.
