@@ -1059,7 +1059,7 @@ impl RpiCamera {
 
     fn find_imx290_bus() -> Result<u8, Box<dyn std::error::Error>> {
         // Common I2C buses to check (in order of likelihood).
-        let candidate_buses = [11, 1, 0, 10, 12, 13, 14, 15];
+        let candidate_buses = [11, 1, 0, 10, 12, 13, 14, 15, 4, 6];
         for &bus in &candidate_buses {
             if Self::test_imx290_on_bus(bus)? {
                 log::debug!("Found IMX290 on I2C bus {}", bus);
