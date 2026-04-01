@@ -682,7 +682,8 @@ impl RpiCamera {
             };
             let metadata = req.metadata();
 
-            last_frame_time = Some(Instant::now());
+            let readout_instant = Instant::now();
+            last_frame_time = Some(readout_instant);
             let readout_time = SystemTime::now();
 
             // TODO: drop this.
@@ -940,6 +941,7 @@ impl RpiCamera {
                     params_accurate: mark_image_count == 0,
                     image: Arc::new(image),
                     readout_time,
+                    readout_instant,
                     processing_duration,
                 });
                 locked_state.frame_id += 1;

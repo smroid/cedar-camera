@@ -2,7 +2,7 @@
 // See LICENSE file in root directory for license terms.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use image::GrayImage;
@@ -101,6 +101,7 @@ pub struct CapturedImage {
     pub image: Arc<GrayImage>,
 
     pub readout_time: SystemTime,
+    pub readout_instant: Instant,
 
     // For some camera interfaces (e.g. RPi), there is some post-readout
     // processing needed i.e. to convert pixel format. Typically, this

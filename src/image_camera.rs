@@ -56,6 +56,7 @@ impl ImageCamera {
             params_accurate: true,
             image: Arc::new(image),
             readout_time: SystemTime::now(),
+            readout_instant: Instant::now(),
             processing_duration: None,
         });
         self.frame_id += 1;

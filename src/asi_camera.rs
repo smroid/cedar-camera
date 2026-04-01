@@ -298,6 +298,7 @@ impl ASICamera {
                 params_accurate: mark_image_count == 0,
                 image: Arc::new(image),
                 readout_time: SystemTime::now(),
+                readout_instant: Instant::now(),
                 processing_duration: None,
             });
             if !locked_state.setting_changed && mark_image_count > 0 {
