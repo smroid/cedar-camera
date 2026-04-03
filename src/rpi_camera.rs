@@ -8,8 +8,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-// use libc::{clock_gettime, timespec, CLOCK_BOOTTIME, CLOCK_REALTIME};
-
 use async_trait::async_trait;
 use canonical_error::{
     failed_precondition_error, unimplemented_error, CanonicalError,
@@ -686,22 +684,6 @@ impl RpiCamera {
             last_frame_time = Some(readout_instant);
             let readout_time = SystemTime::now();
 
-            // TODO: drop this.
-            // Use the sensor's hardware timestamp from metadata for accurate
-            // capture time. SensorTimestamp is in nanoseconds since system boot.
-            // Calculate boot_time dynamically to handle system time changes
-            // (e.g., NTP sync).
-            // let boot_time = Self::calculate_boot_time();
-            // let readout_time = metadata.get::<libcamera::controls::SensorTimestamp>()
-            //     .map(|libcamera::controls::SensorTimestamp(ns)| {
-            //         boot_time + Duration::from_nanos(ns as u64)
-            //     })
-            //     .unwrap_or_else(|_| {
-            //         // Fallback to current time if sensor timestamp unavailable
-            //         warn!("SensorTimestamp not available in metadata, using SystemTime::now()");
-            //         SystemTime::now()
-            //     });
-
             let width;
             let height;
             let pisp_compressed;
@@ -820,11 +802,6 @@ impl RpiCamera {
             let image =
                 GrayImage::from_raw(width as u32, height as u32, image_data)
                     .unwrap();
-            // Empirically I have seen that there's a transfer time from the
-            // camera that is not captured in the measured processing_duration.
-            // Apply a fudge factor for the transfer time.
-            let processing_duration =
-                Some(last_frame_time.unwrap().elapsed().mul_f64(1.5));
 
             // Handle request re-queueing or collection during pipeline
             // draining.
@@ -942,7 +919,7 @@ impl RpiCamera {
                     image: Arc::new(image),
                     readout_time,
                     readout_instant,
-                    processing_duration,
+                    processing_duration: Some(last_frame_time.unwrap().elapsed()),
                 });
                 locked_state.frame_id += 1;
 

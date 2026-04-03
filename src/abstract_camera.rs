@@ -105,11 +105,9 @@ pub struct CapturedImage {
 
     // For some camera interfaces (e.g. RPi), there is some post-readout
     // processing needed i.e. to convert pixel format. Typically, this
-    // processing is overlapped with the next camera exposure; in such cases it
-    // is pointless to make the camera exposure time less than the processing
-    // time. We thus return the processing duration that was measured for this
-    // capture result so e.g. auto exposure algorithm can use this as the
-    // minimum exposure duration.
+    // processing is overlapped with the next camera exposure, but not always.
+    // We measure the total time needed to acquire and process the camera image
+    // and report it here. Not all camera types populate this field.
     pub processing_duration: Option<Duration>,
 }
 
