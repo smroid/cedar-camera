@@ -18,7 +18,8 @@ use libcamera::{
     camera_manager::CameraManager,
     control::ControlList,
     controls::{
-        AeEnable, AnalogueGain, AwbEnable, ExposureTime, NoiseReductionMode,
+        AeEnable, AnalogueGain, AwbEnable, ExposureTime, FrameDurationLimits,
+        NoiseReductionMode,
     },
     framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
     framebuffer_map::MemoryMappedFrameBuffer,
@@ -414,6 +415,12 @@ impl RpiCamera {
             )))
             .unwrap();
         controls.set(NoiseReductionMode::Off).unwrap();
+        if state.model == "imx290" {
+            // Force 60fps mode
+            controls
+                .set(FrameDurationLimits([16_667, 1_000_000]))
+                .unwrap();
+        }
     }
 
     // Convert 10 or 12 bit pixels to 8 bits, by keeping the upper 8 bits.
