@@ -42,16 +42,16 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
-    let mut camera = select_camera(None, 0).unwrap();
+    let mut camera = select_camera(None, 0).await.unwrap();
 
     // Ignore cameras that can't set offset.
     let _ = camera.set_offset(Offset::new(args.offset));
 
-    camera.set_gain(Gain::new(args.gain)).unwrap();
+    camera.set_gain(Gain::new(args.gain)).await.unwrap();
 
     let exposure_time_millisec = args.exposure_time;
     camera.set_exposure_duration(Duration::from_micros(
-        exposure_time_millisec as u64 * 1000)).unwrap();
+        exposure_time_millisec as u64 * 1000)).await.unwrap();
     let (captured_image, _frame_id) = camera.capture_image(None).await.unwrap();
 
     // Move captured_image's image data into a GrayImage.

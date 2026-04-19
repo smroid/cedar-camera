@@ -34,22 +34,22 @@ async fn main() {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-    let mut camera = select_camera(None, 0).unwrap();
-    info!("camera: {}", camera.model());
-    info!("detail: {:?}", camera.model_detail());
+    let mut camera = select_camera(None, 0).await.unwrap();
+    info!("camera: {}", camera.model().await);
+    info!("detail: {:?}", camera.model_detail().await);
     // Ignore cameras that can't set offset.
-    let _ = camera.set_offset(Offset::new(3));
+    let _ = camera.set_offset(Offset::new(3)).await;
 
-    let (width, height) = camera.dimensions();
+    let (width, height) = camera.dimensions().await;
     // Central region.
     let roi = Rect::at(width / 2, height / 2).of_size(30, 30);
 
     let mut frame_id = -1;
     for gain in [0, 1, 2, 5, 10, 20, 50, 100] {
-        camera.set_gain(Gain::new(gain)).unwrap();
+        camera.set_gain(Gain::new(gain)).await.unwrap();
         for exp_ms in [1, 2, 5, 10] {
             camera.set_exposure_duration(Duration::from_micros(
-                exp_ms as u64 * 1000)).unwrap();
+                exp_ms as u64 * 1000)).await.unwrap();
             let image;
             let mut captured_image;
             loop {

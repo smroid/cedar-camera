@@ -22,8 +22,10 @@ pub enum CameraInterface {
 //   indicates which interface's camera is to be returned.
 // * `camera_index` controls which camera (on the selected interface) is
 //   returned.
-pub fn select_camera(mut camera_interface: Option<&CameraInterface>,
-                     camera_index: i32) -> Result<Box<dyn AbstractCamera + Send>, CanonicalError> {
+pub async fn select_camera(
+    mut camera_interface: Option<&CameraInterface>, camera_index: usize)
+    -> Result<Box<dyn AbstractCamera + Send>, CanonicalError>
+{
     // Enumerate cameras on supported interfaces.
     let asi_cameras = ASICamera::enumerate_cameras();
     let rpi_cameras = RpiCamera::enumerate_cameras();
@@ -54,10 +56,10 @@ pub fn select_camera(mut camera_interface: Option<&CameraInterface>,
                 "Both ASI and Rpi cameras found but no 'camera_interface' selector was passed"))
         },
         Some(CameraInterface::ASI) => {
-            Ok(Box::new(ASICamera::new(camera_index)?))
+            Ok(Box::new(ASICamera::new(camera_index).await?))
         },
         Some(CameraInterface::Rpi) => {
-            Ok(Box::new(RpiCamera::new(camera_index)?))
+            Ok(Box::new(RpiCamera::new(camera_index).await?))
         },
     }
 }

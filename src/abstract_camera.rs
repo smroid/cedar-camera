@@ -122,50 +122,50 @@ pub trait AbstractCamera {
 
     /// Returns a string identifying what kind of camera this is. e.g.
     /// "ASI120mm mini", "imx477", etc.
-    fn model(&self) -> String;
+    async fn model(&self) -> String;
 
     /// Additional information beyond model(). Usually absent; on Raspberry Pi
     /// cameras this might include information from the dtoverlay entry for
     /// the camera, e.g. "clock-frequency=74250000".
-    fn model_detail(&self) -> Option<String>;
+    async fn model_detail(&self) -> Option<String>;
 
     /// Returns the (width, height) pixel count of this camera type's sensor.
-    fn dimensions(&self) -> (i32, i32);
+    async fn dimensions(&self) -> (i32, i32);
 
     /// Tells if this camera is color (true) or monochrome (false).
     fn is_color(&self) -> bool;
 
     /// Returns the (width, height) dimensions, in mm, of this camera type's
     /// sensor.
-    fn sensor_size(&self) -> (f32, f32);
+    async fn sensor_size(&self) -> (f32, f32);
 
     /// Identifies the gain value that maximizes signal-to-noise performance
     /// for this camera type. See https://www.youtube.com/watch?v=SYQ1i4k62eI
     /// for an explanation of this idea.
-    fn optimal_gain(&self) -> Gain;
+    async fn optimal_gain(&self) -> Gain;
 
     // Changeable parameters that influence subsequent image captures.
 
     /// Returns InvalidArgument if specified exposure duration cannot be
     /// implemented by this camera type. Default is 100ms.
-    fn set_exposure_duration(&mut self, exp_duration: Duration)
-                             -> Result<(), CanonicalError>;
+    async fn set_exposure_duration(&mut self, exp_duration: Duration)
+                                   -> Result<(), CanonicalError>;
     /// Returns the exposure duration to be used for the next exposure.
-    fn get_exposure_duration(&self) -> Duration;
+    async fn get_exposure_duration(&self) -> Duration;
 
     /// Default is the optimal_gain() value.
-    fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError>;
-    fn get_gain(&self) -> Gain;
+    async fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError>;
+    async fn get_gain(&self) -> Gain;
 
     /// Default is 0.
-    fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError>;
-    fn get_offset(&self) -> Offset;
+    async fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError>;
+    async fn get_offset(&self) -> Offset;
 
     // Determines how often an image is captured for return in capture_image().
     // An interval of zero means run continuously-- images are captured as soon
     // as they become available in the camera.
-    fn set_update_interval(&mut self, update_interval: Duration)
-                           -> Result<(), CanonicalError>;
+    async fn set_update_interval(&mut self, update_interval: Duration)
+                                 -> Result<(), CanonicalError>;
 
     // Action methods.
 
@@ -188,7 +188,7 @@ pub trait AbstractCamera {
 
     /// Returns an estimate of how long a call to capture_image() with the given
     /// id will block. None if there is no estimate.
-    fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration>;
+    async fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration>;
 
     /// Some implementations can shut down the camera to save power, e.g. by
     /// discontinuing video mode. A subsequent call to capture_image() will

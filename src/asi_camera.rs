@@ -4,7 +4,7 @@
 use canonical_error::{CanonicalError, failed_precondition_error};
 
 use std::ffi::CStr;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
@@ -28,7 +28,7 @@ pub struct ASICamera {
     max_gain: i32,
 
     // Our state, shared between ASICamera methods and the capture thread.
-    state: Arc<Mutex<SharedState>>,
+    state: Arc<tokio::sync::Mutex<SharedState>>,
 
     // Our capture thread. Executes worker().
     capture_thread: Option<std::thread::JoinHandle<()>>,
@@ -86,8 +86,8 @@ impl ASICamera {
 
     /// Returns an ASICamera instance that implements the AbstractCamera API.
     /// `camera_index` is w.r.t. the enumerate_cameras() vector length.
-    pub fn new(camera_index: i32) -> Result<Self, CanonicalError> {
-        let info = match asi_camera2_sdk::ASICamera::get_property(camera_index) {
+    pub async fn new(camera_index: usize) -> Result<Self, CanonicalError> {
+        let info = match asi_camera2_sdk::ASICamera::get_property(camera_index as i32) {
             Ok(prop) => prop,
             Err(e) => return Err(failed_precondition_error(&e.to_string()))
         };
@@ -128,7 +128,7 @@ impl ASICamera {
         let mut cam = ASICamera{
             asi_cam_sdk: Arc::new(Mutex::new(asi_cam_sdk)),
             info, default_gain, min_gain, max_gain,
-            state: Arc::new(Mutex::new(SharedState{
+            state: Arc::new(tokio::sync::Mutex::new(SharedState{
                 camera_settings: CaptureParams::new(),
                 setting_changed: false,
                 update_interval: Duration::ZERO,
@@ -140,7 +140,7 @@ impl ASICamera {
             })),
             capture_thread: None,
         };
-        cam.set_gain(cam.optimal_gain())?;
+        cam.set_gain(cam.optimal_gain().await).await?;
         info!("Created ASICamera API object");
         Ok(cam)
     }  // new().
@@ -149,17 +149,17 @@ impl ASICamera {
     // recently captured image is invalidated, and `params_accurate` in
     // subsequent captured images will be false until the setting change is
     // reflected in the captured image stream.
-    fn changed_setting(locked_state: &mut MutexGuard<SharedState>) {
+    fn changed_setting(locked_state: &mut SharedState) {
         locked_state.setting_changed = true;
         locked_state.most_recent_capture = None;
     }
 
     // The first call to capture_image() starts the capture thread that
     // executes this function.
-    fn worker(min_gain: i32, max_gain: i32,
-              width: usize, height: usize,
-              state: Arc<Mutex<SharedState>>,
-              asi_cam_sdk: Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
+    async fn worker(min_gain: i32, max_gain: i32,
+                    width: usize, height: usize,
+                    state: Arc<tokio::sync::Mutex<SharedState>>,
+                    asi_cam_sdk: Arc<Mutex<asi_camera2_sdk::ASICamera>>) {
         debug!("Starting ASICamera worker");
         let mut locked_sdk = asi_cam_sdk.lock().unwrap();
         let mut starting = true;
@@ -180,7 +180,7 @@ impl ASICamera {
             // Do we need to change any camera settings? This is also where
             // the initial camera settings are processed.
             {
-                let mut locked_state = state.lock().unwrap();
+                let mut locked_state = state.lock().await;
                 if recover_camera {
                     if let Err(close_err) = locked_sdk.close() {
                         warn!("Error closing asi_cam_sdk: {}", &close_err.to_string());
@@ -259,11 +259,11 @@ impl ASICamera {
                 let now = Instant::now();
                 if next_update_time > now {
                     let delay = next_update_time - now;
-                    state.lock().unwrap().eta = Some(now + delay);
+                    state.lock().await.eta = Some(now + delay);
                     std::thread::sleep(delay);
                     continue;
                 }
-                state.lock().unwrap().eta = None;
+                state.lock().await.eta = None;
             }
 
             // Time to grab a frame.
@@ -283,10 +283,10 @@ impl ASICamera {
                     }
                 }
             if update_interval == Duration::ZERO {
-                state.lock().unwrap().eta = Some(Instant::now() + exp_duration);
+                state.lock().await.eta = Some(Instant::now() + exp_duration);
             }
 
-            let mut locked_state = state.lock().unwrap();
+            let mut locked_state = state.lock().await;
             if locked_state.setting_changed {
                 mark_image_count = pipeline_depth;
                 locked_state.setting_changed = false;
@@ -345,7 +345,7 @@ impl ASICamera {
                     .build().unwrap();
                 runtime.block_on(async move {
                     Self::worker(
-                        min_gain, max_gain, width, height, cloned_state, cloned_sdk);
+                        min_gain, max_gain, width, height, cloned_state, cloned_sdk).await;
                 });
             }));
         }
@@ -362,14 +362,14 @@ impl Drop for ASICamera {
 
 #[async_trait]
 impl AbstractCamera for ASICamera {
-    fn model(&self) -> String {
+    async fn model(&self) -> String {
         let cstr = CStr::from_bytes_until_nul(&self.info.Name).unwrap();
         cstr.to_str().unwrap().to_owned()
     }
 
-    fn model_detail(&self) -> Option<String> { None }
+    async fn model_detail(&self) -> Option<String> { None }
 
-    fn dimensions(&self) -> (i32, i32) {
+    async fn dimensions(&self) -> (i32, i32) {
         (self.info.MaxWidth as i32, self.info.MaxHeight as i32)
     }
 
@@ -377,18 +377,18 @@ impl AbstractCamera for ASICamera {
         self.info.IsColorCam != 0
     }
 
-    fn sensor_size(&self) -> (f32, f32) {
-        let (width, height) = self.dimensions();
+    async fn sensor_size(&self) -> (f32, f32) {
+        let (width, height) = self.dimensions().await;
         let pixel_size_microns = self.info.PixelSize;
         ((width as f64 * pixel_size_microns / 1000.0) as f32,
          (height as f64 * pixel_size_microns / 1000.0) as f32)
     }
 
-    fn optimal_gain(&self) -> Gain {
+    async fn optimal_gain(&self) -> Gain {
         // In SDK units.
         let optimal_gain =
         // Use the optimal gain value for each ASI camera model.
-            match self.model().as_str() {
+            match self.model().await.as_str() {
                 "ZWO ASI120MM Mini" => {
                     // Per graphs at
                     // https://astronomy-imaging-camera.com/product/asi120mm-mini-mono
@@ -407,49 +407,49 @@ impl AbstractCamera for ASICamera {
         Gain::new((100.0 * frac) as i32)
     }
 
-    fn set_exposure_duration(&mut self, exp_duration: Duration)
+    async fn set_exposure_duration(&mut self, exp_duration: Duration)
                              -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
+        let mut locked_state = self.state.lock().await;
         if locked_state.camera_settings.exposure_duration != exp_duration {
             ASICamera::changed_setting(&mut locked_state);
         }
         locked_state.camera_settings.exposure_duration = exp_duration;
         Ok(())
     }
-    fn get_exposure_duration(&self) -> Duration {
-        let locked_state = self.state.lock().unwrap();
+    async fn get_exposure_duration(&self) -> Duration {
+        let locked_state = self.state.lock().await;
         locked_state.camera_settings.exposure_duration
     }
 
-    fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
+    async fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
+        let mut locked_state = self.state.lock().await;
         if locked_state.camera_settings.gain != gain {
             ASICamera::changed_setting(&mut locked_state);
         }
         locked_state.camera_settings.gain = gain;
         Ok(())
     }
-    fn get_gain(&self) -> Gain {
-        let locked_state = self.state.lock().unwrap();
+    async fn get_gain(&self) -> Gain {
+        let locked_state = self.state.lock().await;
         locked_state.camera_settings.gain
     }
 
-    fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
+    async fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError> {
+        let mut locked_state = self.state.lock().await;
         if locked_state.camera_settings.offset != offset {
             ASICamera::changed_setting(&mut locked_state);
         }
         locked_state.camera_settings.offset = offset;
         Ok(())
     }
-    fn get_offset(&self) -> Offset {
-        let locked_state = self.state.lock().unwrap();
+    async fn get_offset(&self) -> Offset {
+        let locked_state = self.state.lock().await;
         locked_state.camera_settings.offset
     }
 
-    fn set_update_interval(&mut self, update_interval: Duration)
+    async fn set_update_interval(&mut self, update_interval: Duration)
                            -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
+        let mut locked_state = self.state.lock().await;
         locked_state.update_interval = update_interval;
         Ok(())
     }
@@ -462,7 +462,7 @@ impl AbstractCamera for ASICamera {
         loop {
             let mut sleep_duration = Duration::from_millis(1);
             {
-                let locked_state = self.state.lock().unwrap();
+                let locked_state = self.state.lock().await;
                 if locked_state.most_recent_capture.is_some() &&
                     (prev_frame_id.is_none() ||
                      prev_frame_id.unwrap() != locked_state.frame_id)
@@ -491,7 +491,7 @@ impl AbstractCamera for ASICamera {
         // Get the most recently posted image; return None if there is none yet
         // or the currently posted image's frame id is the same as
         // `prev_frame_id`.
-        let locked_state = self.state.lock().unwrap();
+        let locked_state = self.state.lock().await;
         if locked_state.most_recent_capture.is_some() &&
             (prev_frame_id.is_none() ||
              prev_frame_id.unwrap() != locked_state.frame_id)
@@ -503,8 +503,8 @@ impl AbstractCamera for ASICamera {
         Ok(None)
     }
 
-    fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
-        let locked_state = self.state.lock().unwrap();
+    async fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
+        let locked_state = self.state.lock().await;
         if locked_state.most_recent_capture.is_some() &&
             (prev_frame_id.is_none() ||
              prev_frame_id.unwrap() != locked_state.frame_id)
@@ -519,7 +519,7 @@ impl AbstractCamera for ASICamera {
 
     async fn stop(&mut self) {
         if self.capture_thread.is_some() {
-            self.state.lock().unwrap().stop_request = true;
+            self.state.lock().await.stop_request = true;
             self.capture_thread.take().unwrap();
         }
     }

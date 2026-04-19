@@ -32,7 +32,7 @@ pub struct ImageCamera {
 }
 
 impl ImageCamera {
-    pub fn new(image: GrayImage) -> Result<Self, CanonicalError> {
+    pub async fn new(image: GrayImage) -> Result<Self, CanonicalError> {
         let mut ic = ImageCamera{image: Arc::new(image),
                                  exposure_duration: Duration::from_millis(50),
                                  offset: Offset::new(3),
@@ -41,17 +41,17 @@ impl ImageCamera {
                                  most_recent_capture: None,
                                  frame_id: 0,
                                  last_frame_time: Instant::now(),};
-        ic.capture_image();
+        ic.capture_image().await;
         Ok(ic)
     }
 
-    fn capture_image(&mut self) {
+    async fn capture_image(&mut self) {
         let image = self.image.deref().clone();
         self.most_recent_capture = Some(CapturedImage {
             capture_params: CaptureParams {
-                exposure_duration: self.get_exposure_duration(),
-                gain: self.get_gain(),
-                offset: self.get_offset(),
+                exposure_duration: self.get_exposure_duration().await,
+                gain: self.get_gain().await,
+                offset: self.get_offset().await,
             },
             params_accurate: true,
             image: Arc::new(image),
@@ -66,13 +66,13 @@ impl ImageCamera {
 
 #[async_trait]
 impl AbstractCamera for ImageCamera {
-    fn model(&self) -> String {
+    async fn model(&self) -> String {
         "ImageCamera".to_string()
     }
 
-    fn model_detail(&self) -> Option<String> { None }
+    async fn model_detail(&self) -> Option<String> { None }
 
-    fn dimensions(&self) -> (i32, i32) {
+    async fn dimensions(&self) -> (i32, i32) {
         (self.image.dimensions().0 as i32, self.image.dimensions().1 as i32)
     }
 
@@ -80,40 +80,40 @@ impl AbstractCamera for ImageCamera {
         false
     }
 
-    fn sensor_size(&self) -> (f32, f32) {
+    async fn sensor_size(&self) -> (f32, f32) {
         (4.8, 3.6)
     }
 
-    fn optimal_gain(&self) -> Gain {
+    async fn optimal_gain(&self) -> Gain {
         Gain::new(50)
     }
 
-    fn set_exposure_duration(&mut self, _exp_duration: Duration)
-                             -> Result<(), CanonicalError> {
+    async fn set_exposure_duration(&mut self, _exp_duration: Duration)
+                                   -> Result<(), CanonicalError> {
         Ok(())  // Quietly ignore.
     }
-    fn get_exposure_duration(&self) -> Duration {
+    async fn get_exposure_duration(&self) -> Duration {
         self.exposure_duration
     }
 
-    fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
+    async fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
         self.gain = gain;
         Ok(())
     }
-    fn get_gain(&self) -> Gain {
+    async fn get_gain(&self) -> Gain {
         self.gain
     }
 
-    fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError> {
+    async fn set_offset(&mut self, offset: Offset) -> Result<(), CanonicalError> {
         self.offset = offset;
         Ok(())
     }
-    fn get_offset(&self) -> Offset {
+    async fn get_offset(&self) -> Offset {
         self.offset
     }
 
-    fn set_update_interval(&mut self, update_interval: Duration)
-                           -> Result<(), CanonicalError> {
+    async fn set_update_interval(&mut self, update_interval: Duration)
+                                 -> Result<(), CanonicalError> {
         self.update_interval = update_interval;
         Ok(())
     }
@@ -126,10 +126,10 @@ impl AbstractCamera for ImageCamera {
         let next_frame_time = self.last_frame_time + interval;
         let sleep_interval = next_frame_time.saturating_duration_since(Instant::now());
         if sleep_interval == Duration::ZERO {
-            self.capture_image();
+            self.capture_image().await;
         } else if need_new_image {
             tokio::time::sleep(sleep_interval).await;
-            self.capture_image();
+            self.capture_image().await;
         }
         Ok((self.most_recent_capture.clone().unwrap(), self.frame_id))
     }
@@ -144,14 +144,14 @@ impl AbstractCamera for ImageCamera {
         let next_frame_time = self.last_frame_time + interval;
         let sleep_interval = next_frame_time.saturating_duration_since(Instant::now());
         if sleep_interval == Duration::ZERO {
-            self.capture_image();
+            self.capture_image().await;
         } else if need_new_image {
             return Ok(None);
         }
         Ok(Some((self.most_recent_capture.clone().unwrap(), self.frame_id)))
     }
 
-    fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
+    async fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
         if prev_frame_id.is_some() && prev_frame_id.unwrap() == self.frame_id {
             let interval = cmp::max(self.exposure_duration, self.update_interval);
             let next_frame_time = self.last_frame_time + interval;

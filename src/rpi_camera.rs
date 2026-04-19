@@ -4,7 +4,7 @@
 use std::{
     fs,
     process::Command,
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{atomic::{AtomicBool, Ordering}, Arc, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -64,7 +64,10 @@ pub struct RpiCamera {
     is_color: bool,
 
     // Our state, shared between RpiCamera methods and the capture thread.
-    state: Arc<Mutex<SharedState>>,
+    state: Arc<tokio::sync::Mutex<SharedState>>,
+
+    // Set by stop(); the capture thread exits when it sees this.
+    stop_request: Arc<AtomicBool>,
 
     // Our capture thread. Executes worker().
     capture_thread: Option<std::thread::JoinHandle<()>>,
@@ -72,6 +75,7 @@ pub struct RpiCamera {
 
 // State shared between capture thread and the RpiCamera methods.
 struct SharedState {
+    camera_index: usize,
     model: String,
     model_detail: Option<String>, // dtoverlay params, if any.
 
@@ -109,9 +113,6 @@ struct SharedState {
     most_recent_capture: Option<CapturedImage>,
     frame_id: i32,
 
-    // Set by stop(); the capture thread exits when it sees this.
-    stop_request: bool,
-
     // HCG (High Conversion Gain) mode state for IMX290 sensors.
     hcg_enabled: bool,
     hcg_needs_reinit: bool,
@@ -143,10 +144,10 @@ impl RpiCamera {
 
     // Returns a RpiCamera instance that implements the AbstractCamera API.
     // `camera_index` is w.r.t. the enumerate_cameras() vector length.
-    pub fn new(camera_index: i32) -> Result<Self, CanonicalError> {
+    pub async fn new(camera_index: usize) -> Result<Self, CanonicalError> {
         let mgr = CameraManager::new().unwrap();
         let cameras = mgr.cameras();
-        let cam = cameras.get(camera_index as usize).unwrap();
+        let cam = cameras.get(camera_index).unwrap();
         let cfgs = Self::get_camera_configs(&cam)?;
         let stream_config = cfgs.get(0).unwrap();
         let props = cam.properties();
@@ -240,7 +241,8 @@ impl RpiCamera {
             sensor_height: height as f32 * pixel_size_nanometers.height as f32
                 / 1000000.0,
             is_color,
-            state: Arc::new(Mutex::new(SharedState {
+            state: Arc::new(tokio::sync::Mutex::new(SharedState {
+                camera_index,
                 model: model.to_string(),
                 model_detail,
                 min_gain,
@@ -258,15 +260,15 @@ impl RpiCamera {
                 eta: None,
                 most_recent_capture: None,
                 frame_id: 0,
-                stop_request: false,
                 hcg_enabled: false,
                 hcg_needs_reinit: false,
                 hcg_draining_pipeline: false,
                 in_flight_request_count: 0,
             })),
+            stop_request: Arc::new(AtomicBool::new(false)),
             capture_thread: None,
         };
-        cam.set_gain(cam.optimal_gain())?;
+        cam.set_gain(cam.optimal_gain().await).await?;
         Ok(cam)
     }
 
@@ -390,15 +392,13 @@ impl RpiCamera {
     // recently captured image is invalidated, and the next call to
     // capture_image() will wait for the setting change to be reflected in
     // the captured image stream.
-    fn changed_setting(locked_state: &mut MutexGuard<SharedState>) {
+    fn changed_setting(locked_state: &mut SharedState) {
         locked_state.setting_changed = true;
         locked_state.most_recent_capture = None;
     }
 
-    fn setup_camera_request(
-        controls: &mut ControlList,
-        state: &MutexGuard<SharedState>,
-    ) {
+    fn setup_camera_request(controls: &mut ControlList,
+                            state: &SharedState) {
         let settings = &state.camera_settings;
         let exp_duration_micros = settings.exposure_duration.as_micros();
         let abstract_gain = settings.gain.value();
@@ -530,14 +530,15 @@ impl RpiCamera {
 
     // The first call to capture_image() starts the capture thread that
     // executes this function.
-    fn worker(state: Arc<Mutex<SharedState>>) {
+    async fn worker(state: Arc<tokio::sync::Mutex<SharedState>>,
+                    stop_request: Arc<AtomicBool>) {
         info!("Starting RpiCamera worker");
 
         // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
         // started. We need to mark dirty a number of images after a setting
         // change.
-        let pipeline_depth = match state.lock().unwrap().model.as_str() {
+        let pipeline_depth = match state.lock().await.model.as_str() {
             // These values are determined empirically by using the
             // exposure_sweep test program.
             "imx477" => 6,
@@ -559,7 +560,8 @@ impl RpiCamera {
         // logging for now.
         log_set_target(LoggingTarget::None).unwrap();
         let cameras = mgr.cameras();
-        let cam = cameras.get(0).expect("No cameras found");
+        let camera_index = state.lock().await.camera_index;
+        let cam = cameras.get(camera_index).expect("No cameras found");
         let mut active_cam = cam.acquire().expect("Failed to acquire camera");
 
         let mut cfgs = Self::get_camera_configs(&cam)
@@ -602,7 +604,7 @@ impl RpiCamera {
 
         let mut reqs;
         {
-            let mut locked_state = state.lock().unwrap();
+            let mut locked_state = state.lock().await;
             // Create capture requests and attach buffers.
             reqs = buffers
                 .into_iter()
@@ -630,7 +632,7 @@ impl RpiCamera {
         }
         // Adjust in-flight count since we held back one request.
         {
-            let mut locked_state = state.lock().unwrap();
+            let mut locked_state = state.lock().await;
             locked_state.in_flight_request_count -= 1;
         }
 
@@ -645,9 +647,9 @@ impl RpiCamera {
         loop {
             let update_interval: Duration;
             {
-                let mut locked_state = state.lock().unwrap();
+                let locked_state = state.lock().await;
                 update_interval = locked_state.update_interval;
-                if locked_state.stop_request {
+                if stop_request.load(Ordering::Relaxed) {
                     info!("Stopping capture");
                     if let Err(e) = active_cam.stop() {
                         warn!("Error stopping capture: {:?}", e);
@@ -658,7 +660,6 @@ impl RpiCamera {
                         debug!("Drained completed request during shutdown");
                         // Request will be dropped here, releasing its buffer.
                     }
-                    locked_state.stop_request = false;
                     return; // Exit thread.
                 }
             }
@@ -669,7 +670,7 @@ impl RpiCamera {
                 let now = Instant::now();
                 if next_update_time > now {
                     let delay = next_update_time - now;
-                    std::thread::sleep(delay);
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
             }
@@ -701,7 +702,7 @@ impl RpiCamera {
             let actual_exposure_duration;
             let actual_abstract_gain;
             {
-                let mut locked_state = state.lock().unwrap();
+                let mut locked_state = state.lock().await;
                 actual_exposure_duration = metadata
                     .get::<ExposureTime>()
                     .map(|ExposureTime(exp_us)| {
@@ -755,7 +756,7 @@ impl RpiCamera {
             // changes).
             if let Some(mut spare) = spare_request.take() {
                 let controls = spare.controls_mut();
-                let locked_state = state.lock().unwrap();
+                let locked_state = state.lock().await;
                 let draining = locked_state.hcg_draining_pipeline;
                 Self::setup_camera_request(controls, &locked_state);
                 drop(locked_state);
@@ -770,7 +771,7 @@ impl RpiCamera {
                         warn!("Failed to queue spare request: {:?}", e);
                     } else {
                         // Update in-flight count for the queued spare request.
-                        let mut locked_state = state.lock().unwrap();
+                        let mut locked_state = state.lock().await;
                         locked_state.in_flight_request_count += 1;
                     }
                 }
@@ -814,7 +815,7 @@ impl RpiCamera {
             // draining.
             req.reuse(ReuseFlag::REUSE_BUFFERS);
             let controls = req.controls_mut();
-            let mut locked_state = state.lock().unwrap();
+            let mut locked_state = state.lock().await;
 
             // Decrement in-flight count for this completed request.
             locked_state.in_flight_request_count -= 1;
@@ -856,7 +857,7 @@ impl RpiCamera {
                         );
                     }
                     // Wait for HCG change to settle.
-                    std::thread::sleep(Duration::from_millis(50));
+                    tokio::time::sleep(Duration::from_millis(50)).await;
 
                     // Restart camera.
                     debug!("Restarting camera after HCG mode change");
@@ -878,7 +879,7 @@ impl RpiCamera {
                     }
                     // Brief delay for the second HCG change to settle before
                     // resuming capture.
-                    std::thread::sleep(Duration::from_millis(50));
+                    tokio::time::sleep(Duration::from_millis(50)).await;
 
                     // Re-queue all collected requests.
                     let num_collected = collected_requests.len();
@@ -895,7 +896,7 @@ impl RpiCamera {
                     }
 
                     // Reset state and update counters.
-                    locked_state = state.lock().unwrap();
+                    locked_state = state.lock().await;
                     locked_state.hcg_needs_reinit = false;
                     locked_state.hcg_draining_pipeline = false;
                     locked_state.in_flight_request_count = num_collected;
@@ -974,7 +975,7 @@ impl RpiCamera {
         (frac * 100.0).ceil().clamp(0.0, 100.0) as i32
     }
 
-    fn manage_worker_thread(&mut self) {
+    async fn manage_worker_thread(&mut self) {
         // Has the worker terminated for some reason?
         if self.capture_thread.is_some()
             && self.capture_thread.as_ref().unwrap().is_finished()
@@ -984,10 +985,19 @@ impl RpiCamera {
         // Start capture thread if terminated or not yet started.
         if self.capture_thread.is_none() {
             let cloned_state = self.state.clone();
+            let cloned_stop_request = self.stop_request.clone();
             // Allocate a thread for concurrent execution of image acquisition
             // and uncompressing with other activities.
             self.capture_thread = Some(std::thread::spawn(move || {
-                Self::worker(cloned_state);
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("rpi_camera")
+                    .worker_threads(1)
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    Self::worker(cloned_state, cloned_stop_request).await;
+                });
             }));
         }
     }
@@ -1101,60 +1111,31 @@ impl RpiCamera {
         }
         None
     }
-
-    // Calculate the system boot time using CLOCK_BOOTTIME and CLOCK_REALTIME.
-    // Sensor timestamps are relative to boot, so we need to convert them to
-    // absolute SystemTime by adding to boot_time. CLOCK_BOOTTIME is the same
-    // clock that sensor timestamps are relative to.
-    // fn calculate_boot_time() -> SystemTime {
-    //     unsafe {
-    //         let mut realtime_ts: timespec = std::mem::zeroed();
-    //         let mut boottime_ts: timespec = std::mem::zeroed();
-
-    //         // Read both clocks with minimal delay between them.
-    //         let ret_realtime = clock_gettime(CLOCK_REALTIME, &mut realtime_ts);
-    //         let ret_boottime = clock_gettime(CLOCK_BOOTTIME, &mut boottime_ts);
-    //         if ret_realtime == 0 && ret_boottime == 0 {
-    //             // Convert to durations.
-    //             let realtime = Duration::new(realtime_ts.tv_sec as u64, realtime_ts.tv_nsec as u32);
-    //             let boottime = Duration::new(boottime_ts.tv_sec as u64, boottime_ts.tv_nsec as u32);
-
-    //             // Boot time = CLOCK_REALTIME - CLOCK_BOOTTIME.
-    //             if let Some(boot_time) = realtime.checked_sub(boottime) {
-    //                 // Convert back to SystemTime (UNIX_EPOCH + duration).
-    //                 let boot_time_systemtime = SystemTime::UNIX_EPOCH + boot_time;
-    //                 debug!("Calculated boot_time using CLOCK_REALTIME - CLOCK_BOOTTIME: {:?}", boot_time_systemtime);
-    //                 return boot_time_systemtime;
-    //             }
-    //         }
-    //     }
-    //     // Fallback: use current time (not ideal but better than way-off values).
-    //     warn!("Using fallback boot_time (current SystemTime::now())");
-    //     SystemTime::now()
-    // }
 } // impl RpiCamera.
 
 /// We arrange to call stop() when RpiCamera object goes out of scope.
 impl Drop for RpiCamera {
     fn drop(&mut self) {
-        // https://stackoverflow.com/questions/71541765/rust-async-drop
-        futures::executor::block_on(self.stop());
+        self.stop_request.store(true, Ordering::Relaxed);
+        // Drop the JoinHandle, detaching the thread. The thread will exit
+        // on its own once it notices stop_request.
+        self.capture_thread.take();
     }
 }
 
 #[async_trait]
 impl AbstractCamera for RpiCamera {
-    fn model(&self) -> String {
-        let locked_state = self.state.lock().unwrap();
+    async fn model(&self) -> String {
+        let locked_state = self.state.lock().await;
         locked_state.model.clone()
     }
 
-    fn model_detail(&self) -> Option<String> {
-        self.state.lock().unwrap().model_detail.clone()
+    async fn model_detail(&self) -> Option<String> {
+        self.state.lock().await.model_detail.clone()
     }
 
-    fn dimensions(&self) -> (i32, i32) {
-        let locked_state = self.state.lock().unwrap();
+    async fn dimensions(&self) -> (i32, i32) {
+        let locked_state = self.state.lock().await;
         (locked_state.width as i32, locked_state.height as i32)
     }
 
@@ -1162,32 +1143,32 @@ impl AbstractCamera for RpiCamera {
         self.is_color
     }
 
-    fn sensor_size(&self) -> (f32, f32) {
+    async fn sensor_size(&self) -> (f32, f32) {
         (self.sensor_width, self.sensor_height)
     }
 
-    fn optimal_gain(&self) -> Gain {
+    async fn optimal_gain(&self) -> Gain {
         Gain::new(100)
     }
 
-    fn set_exposure_duration(
+    async fn set_exposure_duration(
         &mut self,
         exp_duration: Duration,
     ) -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
+        let mut locked_state = self.state.lock().await;
         if locked_state.camera_settings.exposure_duration != exp_duration {
             RpiCamera::changed_setting(&mut locked_state);
         }
         locked_state.camera_settings.exposure_duration = exp_duration;
         Ok(())
     }
-    fn get_exposure_duration(&self) -> Duration {
-        let locked_state = self.state.lock().unwrap();
+    async fn get_exposure_duration(&self) -> Duration {
+        let locked_state = self.state.lock().await;
         locked_state.camera_settings.exposure_duration
     }
 
-    fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
+    async fn set_gain(&mut self, gain: Gain) -> Result<(), CanonicalError> {
+        let mut locked_state = self.state.lock().await;
 
         // Handle HCG mode switching for IMX290 based on gain threshold.
         if locked_state.model == "imx290" {
@@ -1210,25 +1191,25 @@ impl AbstractCamera for RpiCamera {
         locked_state.camera_settings.gain = gain;
         Ok(())
     }
-    fn get_gain(&self) -> Gain {
-        let locked_state = self.state.lock().unwrap();
+    async fn get_gain(&self) -> Gain {
+        let locked_state = self.state.lock().await;
         locked_state.camera_settings.gain
     }
 
-    fn set_offset(&mut self, _offset: Offset) -> Result<(), CanonicalError> {
+    async fn set_offset(&mut self, _offset: Offset) -> Result<(), CanonicalError> {
         Err(unimplemented_error(
-            format!("Offset not supported for {}", self.model()).as_str(),
+            format!("Offset not supported for {}", self.model().await).as_str(),
         ))
     }
-    fn get_offset(&self) -> Offset {
+    async fn get_offset(&self) -> Offset {
         Offset::new(0)
     }
 
-    fn set_update_interval(
+    async fn set_update_interval(
         &mut self,
         update_interval: Duration,
     ) -> Result<(), CanonicalError> {
-        let mut locked_state = self.state.lock().unwrap();
+        let mut locked_state = self.state.lock().await;
         locked_state.update_interval = update_interval;
         Ok(())
     }
@@ -1237,13 +1218,13 @@ impl AbstractCamera for RpiCamera {
         &mut self,
         prev_frame_id: Option<i32>,
     ) -> Result<(CapturedImage, i32), CanonicalError> {
-        self.manage_worker_thread();
+        self.manage_worker_thread().await;
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
         loop {
-            let mut sleep_duration = Duration::from_millis(1);
+            let mut sleep_duration = Duration::from_millis(5);
             {
-                let locked_state = self.state.lock().unwrap();
+                let locked_state = self.state.lock().await;
                 if locked_state.most_recent_capture.is_some()
                     && (prev_frame_id.is_none()
                         || prev_frame_id.unwrap() != locked_state.frame_id)
@@ -1272,11 +1253,11 @@ impl AbstractCamera for RpiCamera {
         &mut self,
         prev_frame_id: Option<i32>,
     ) -> Result<Option<(CapturedImage, i32)>, CanonicalError> {
-        self.manage_worker_thread();
+        self.manage_worker_thread().await;
         // Get the most recently posted image; return none if there is none yet
         // or the currently posted image's frame id is the same as
         // `prev_frame_id`.
-        let locked_state = self.state.lock().unwrap();
+        let locked_state = self.state.lock().await;
         if locked_state.most_recent_capture.is_some()
             && (prev_frame_id.is_none()
                 || prev_frame_id.unwrap() != locked_state.frame_id)
@@ -1290,8 +1271,8 @@ impl AbstractCamera for RpiCamera {
         Ok(None)
     }
 
-    fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
-        let locked_state = self.state.lock().unwrap();
+    async fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration> {
+        let locked_state = self.state.lock().await;
         if locked_state.most_recent_capture.is_some()
             && (prev_frame_id.is_none()
                 || prev_frame_id.unwrap() != locked_state.frame_id)
@@ -1310,9 +1291,7 @@ impl AbstractCamera for RpiCamera {
     }
 
     async fn stop(&mut self) {
-        if self.capture_thread.is_some() {
-            self.state.lock().unwrap().stop_request = true;
-            self.capture_thread.take().unwrap();
-        }
+        self.stop_request.store(true, Ordering::Relaxed);
+        self.capture_thread.take();
     }
 }
