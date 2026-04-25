@@ -90,10 +90,11 @@ struct SharedState {
     pisp_compressed: bool,
     pisp_compression_mode: i32,
 
-    // The next three fields are ignored if PiSP compression (previous field)
-    // is used. If neither is true, then it is 8 bits.
+    // The next four fields are ignored if PiSP compression (previous field)
+    // is used. If none are true, then it is 8 bits.
     is_10_bit: bool,
     is_12_bit: bool,
+    is_16_bit: bool,
 
     is_packed: bool,
 
@@ -204,6 +205,7 @@ impl RpiCamera {
             pixel_format.ends_with("12_CSI2P") || pixel_format.ends_with("12");
         let is_10_bit =
             pixel_format.ends_with("10_CSI2P") || pixel_format.ends_with("10");
+        let is_16_bit = pixel_format.ends_with("16");
         let is_packed = pixel_format.ends_with("_CSI2P");
         let is_color = if pisp_compressed {
             !pixel_format.contains("MONO")
@@ -253,6 +255,7 @@ impl RpiCamera {
                 pisp_compression_mode,
                 is_10_bit,
                 is_12_bit,
+                is_16_bit,
                 is_packed,
                 camera_settings: CaptureParams::new(),
                 setting_changed: false,
@@ -385,7 +388,79 @@ impl RpiCamera {
                 }
             }
         }
+
+        let mut stream_config = cfgs.get_mut(0).unwrap();
+        let selected_format = stream_config.get_pixel_format();
+        // If a compressed format is chosen, attempt to enforce 16-bit for
+        // faster conversion to 8-bit
+        if format!("{:?}", selected_format).contains("PISP_COMP") {
+            info!("Found compressed format, attempt to force 16-bit");
+            let target_fmt_str = if let Some(pref) = preferred_format {
+                format!("{:?}", pref)
+            } else {
+                format!("{:?}", original_format)
+            };
+            let is_12_bit = target_fmt_str.contains("12");
+            let bit_char = if is_12_bit { b'2' } else { b'0' };
+
+            let code = if target_fmt_str.contains("RGGB") {
+                Some(Self::fourcc(b'R', b'G', b'1', bit_char))
+            } else if target_fmt_str.contains("BGGR") {
+                Some(Self::fourcc(b'B', b'G', b'1', bit_char))
+            } else if target_fmt_str.contains("GBRG") {
+                Some(Self::fourcc(b'G', b'B', b'1', bit_char))
+            } else if target_fmt_str.contains("GRBG") {
+                Some(Self::fourcc(b'g', b'r', b'1', bit_char))
+            } else if target_fmt_str.contains("GREY")
+                || target_fmt_str.contains("Y10")
+                || target_fmt_str.contains("Y12")
+            {
+                Some(Self::fourcc(b'R', b'1', bit_char, b' '))
+            } else {
+                None
+            };
+
+            if let Some(c) = code {
+                let fmt_unpacked = PixelFormat::new(c, 0);
+                stream_config.set_pixel_format(fmt_unpacked);
+                drop(stream_config);
+                match cfgs.validate() {
+                    CameraConfigurationStatus::Valid => {}
+                    CameraConfigurationStatus::Adjusted => {
+                        debug!("Camera configuration was adjusted: {:#?}", cfgs);
+                    }
+                    CameraConfigurationStatus::Invalid => {
+                        // Fallback to original format
+                        warn!("{} format rejected", format_type);
+                        cfgs.get_mut(0).unwrap().set_pixel_format(original_format);
+                        match cfgs.validate() {
+                            CameraConfigurationStatus::Valid
+                            | CameraConfigurationStatus::Adjusted => {
+                                warn!(
+                                    "Using fallback format: {:?}",
+                                    original_format
+                                );
+                            }
+                            CameraConfigurationStatus::Invalid => {
+                                return Err(failed_precondition_error(
+                                    format!(
+                                        "Camera configuration was rejected: {:#?}",
+                                        cfgs
+                                    )
+                                    .as_str(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(cfgs)
+    }
+
+    const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
+        (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
     }
 
     // This function is called whenever a camera setting is changed. The most
@@ -444,10 +519,11 @@ impl RpiCamera {
         height: usize,
         is_10_bit: bool,
         is_12_bit: bool,
+        is_16_bit: bool,
         is_packed: bool,
     ) {
         // Handle 8-bit format: no conversion needed, direct copy.
-        if !is_10_bit && !is_12_bit {
+        if !is_10_bit && !is_12_bit && !is_16_bit {
             // For 8-bit, stride should equal width (1 byte per pixel).
             if stride == width {
                 // Simple copy for contiguous data.
@@ -461,6 +537,24 @@ impl RpiCamera {
                     image_data[dst_start..dst_start + width].copy_from_slice(
                         &buf_data[src_start..src_start + width],
                     );
+                }
+            }
+            return;
+        }
+
+        if is_16_bit {
+            // Convert from unpacked 16 bit to 8 bit.
+            // Assuming little-endian, the most significant byte is at index 1 of the 2-byte sequence.
+            for row in 0..height {
+                let buf_row_start = row * stride;
+                let buf_row_end = buf_row_start + width * 2;
+                let pix_row_start = row * width;
+                let pix_row_end = pix_row_start + width;
+                for (src_chunk, dst) in buf_data[buf_row_start..buf_row_end]
+                    .chunks_exact(2)
+                    .zip(image_data[pix_row_start..pix_row_end].iter_mut())
+                {
+                    *dst = src_chunk[1];
                 }
             }
             return;
@@ -698,6 +792,7 @@ impl RpiCamera {
             let pisp_compression_mode;
             let is_10_bit;
             let is_12_bit;
+            let is_16_bit;
             let is_packed;
             let actual_exposure_duration;
             let actual_abstract_gain;
@@ -725,6 +820,7 @@ impl RpiCamera {
                 pisp_compression_mode = locked_state.pisp_compression_mode;
                 is_10_bit = locked_state.is_10_bit;
                 is_12_bit = locked_state.is_12_bit;
+                is_16_bit = locked_state.is_16_bit;
                 is_packed = locked_state.is_packed;
                 if locked_state.setting_changed {
                     mark_image_count = pipeline_depth;
@@ -804,6 +900,7 @@ impl RpiCamera {
                     height,
                     is_10_bit,
                     is_12_bit,
+                    is_16_bit,
                     is_packed,
                 );
             }
