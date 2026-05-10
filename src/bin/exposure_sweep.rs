@@ -9,7 +9,10 @@ use env_logger;
 use log::info;
 use imageproc::rect::Rect;
 
-use cedar_camera::abstract_camera::{Gain, Offset, bin_2x2};
+use cedar_camera::abstract_camera::{Gain, Offset};
+use fast_image_resize::images::Image;
+use fast_image_resize::{FilterType, Resizer, ResizeOptions, ResizeAlg::Convolution};
+use image::GrayImage;
 use cedar_camera::select_camera::select_camera;
 use cedar_detect::algorithm::{estimate_background_from_image_region};
 
@@ -22,6 +25,19 @@ struct Args {
     /// filename and a .bmp extension.
     #[arg(short, long)]
     output: String,
+}
+
+fn bin_2x2(image: GrayImage) -> GrayImage {
+    let (width, height) = image.dimensions();
+    let resized_width = width / 2;
+    let resized_height = height / 2;
+    let src_image = Image::from_vec_u8(width, height, image.into_raw(),
+                                       fast_image_resize::PixelType::U8).unwrap();
+    let mut dst_image = Image::new(resized_width, resized_height, src_image.pixel_type());
+    let mut resizer = Resizer::new();
+    resizer.resize(&src_image, &mut dst_image,
+                   &ResizeOptions::new().resize_alg(Convolution(FilterType::Box))).unwrap();
+    GrayImage::from_raw(resized_width, resized_height, dst_image.into_vec()).unwrap()
 }
 
 #[tokio::main]
