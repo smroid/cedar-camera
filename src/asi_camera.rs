@@ -369,8 +369,8 @@ impl AbstractCamera for ASICamera {
 
     async fn model_detail(&self) -> Option<String> { None }
 
-    async fn dimensions(&self) -> (i32, i32) {
-        (self.info.MaxWidth as i32, self.info.MaxHeight as i32)
+    async fn dimensions(&self) -> (u32, u32) {
+        (self.info.MaxWidth as u32, self.info.MaxHeight as u32)
     }
 
     fn is_color(&self) -> bool {

@@ -58,7 +58,7 @@ async fn main() {
 
     let (width, height) = camera.dimensions().await;
     // Central region.
-    let roi = Rect::at(width / 2, height / 2).of_size(30, 30);
+    let roi = Rect::at((width / 2) as i32, (height / 2) as i32).of_size(30, 30);
 
     let mut frame_id = -1;
     for gain in [0, 1, 2, 5, 10, 20, 50, 100] {

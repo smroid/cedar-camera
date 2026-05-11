@@ -72,8 +72,8 @@ impl AbstractCamera for ImageCamera {
 
     async fn model_detail(&self) -> Option<String> { None }
 
-    async fn dimensions(&self) -> (i32, i32) {
-        (self.image.dimensions().0 as i32, self.image.dimensions().1 as i32)
+    async fn dimensions(&self) -> (u32, u32) {
+        self.image.dimensions()
     }
 
     fn is_color(&self) -> bool {

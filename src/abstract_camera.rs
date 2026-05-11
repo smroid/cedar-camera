@@ -127,7 +127,7 @@ pub trait AbstractCamera {
     async fn model_detail(&self) -> Option<String>;
 
     /// Returns the (width, height) pixel count of this camera type's sensor.
-    async fn dimensions(&self) -> (i32, i32);
+    async fn dimensions(&self) -> (u32, u32);
 
     /// Tells if this camera is color (true) or monochrome (false).
     fn is_color(&self) -> bool;

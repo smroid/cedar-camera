@@ -1231,9 +1231,9 @@ impl AbstractCamera for RpiCamera {
         self.state.lock().await.model_detail.clone()
     }
 
-    async fn dimensions(&self) -> (i32, i32) {
+    async fn dimensions(&self) -> (u32, u32) {
         let locked_state = self.state.lock().await;
-        (locked_state.width as i32, locked_state.height as i32)
+        (locked_state.width as u32, locked_state.height as u32)
     }
 
     fn is_color(&self) -> bool {
