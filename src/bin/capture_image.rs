@@ -42,7 +42,7 @@ async fn main() {
         env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
-    let mut camera = select_camera(None, 0).await.unwrap();
+    let mut camera = select_camera(None, 0, /*prefer_binned=*/false).await.unwrap();
 
     // Ignore cameras that can't set offset.
     let _ = camera.set_offset(Offset::new(args.offset));

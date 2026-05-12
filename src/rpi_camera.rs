@@ -62,6 +62,7 @@ pub struct RpiCamera {
     sensor_height: f32,
 
     is_color: bool,
+    binning: u32,
 
     // Our state, shared between RpiCamera methods and the capture thread.
     state: Arc<tokio::sync::Mutex<SharedState>>,
@@ -243,6 +244,7 @@ impl RpiCamera {
             sensor_height: height as f32 * pixel_size_nanometers.height as f32
                 / 1000000.0,
             is_color,
+            binning: 1,  // TODO: set from prefer_binned arg
             state: Arc::new(tokio::sync::Mutex::new(SharedState {
                 camera_index,
                 model: model.to_string(),
@@ -1246,6 +1248,15 @@ impl AbstractCamera for RpiCamera {
 
     async fn optimal_gain(&self) -> Gain {
         Gain::new(100)
+    }
+
+    fn binning(&self) -> u32 {
+        self.binning
+    }
+
+    async fn set_hardware_binning(&mut self, _hw_binning: bool)
+                                  -> Result<(), CanonicalError> {
+        Ok(())  // TODO: implement hardware binning
     }
 
     async fn set_exposure_duration(

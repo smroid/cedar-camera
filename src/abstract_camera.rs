@@ -89,12 +89,15 @@ pub struct CapturedImage {
     /// exposure when `params_accurate` is false.
     pub params_accurate: bool,
 
-    /// 8 bit pixel data stored in row major order. For color cameras, the raw
-    /// values of the photosites are returned (linearly scaled to 8 bits); no
-    /// demosaicing is done. The caller is responsible for dealing with the
-    /// Bayer patterning of color sensor; a simple approach used by Cedar Detect
-    /// is to apply a simple 2x2 binning which yields a workable luma value
-    /// suitable for detecting and centroiding stars.
+    /// 8 bit pixel data stored in row major order. For color cameras with
+    /// binning==1, the raw values of the photosites are returned (linearly
+    /// scaled to 8 bits); no demosaicing is done. The caller is responsible for
+    /// dealing with the Bayer patterning of the color sensor; a simple approach
+    /// used by Cedar Detect is to apply a simple 2x2 binning which yields a
+    /// workable 8-bit monochrome value suitable for detecting and centroiding
+    /// stars.
+    /// For color cameras with binning==2, capture_image() applies 2x2 binning
+    /// resulting in `image` being reduced resolution 8-bit monochrome.
     pub image: Arc<GrayImage>,
 
     pub readout_time: SystemTime,
@@ -129,7 +132,8 @@ pub trait AbstractCamera {
     /// Returns the (width, height) pixel count of this camera type's sensor.
     async fn dimensions(&self) -> (u32, u32);
 
-    /// Tells if this camera is color (true) or monochrome (false).
+    /// Tells if this camera is color (true) or monochrome (false). See notes
+    /// on CapturedImage.image field.
     fn is_color(&self) -> bool;
 
     /// Returns the (width, height) dimensions, in mm, of this camera type's
@@ -140,6 +144,11 @@ pub trait AbstractCamera {
     /// for this camera type. See https://www.youtube.com/watch?v=SYQ1i4k62eI
     /// for an explanation of this idea.
     async fn optimal_gain(&self) -> Gain;
+
+    // Tells if CapturedImage.image is the full dimensions() of this camera
+    // (binning==1) or whether 2x2 binning has been applied (binning==2), in
+    // which case the CapturedImage.image is half size in both dimensions.
+    fn binning(&self) -> u32;
 
     // Changeable parameters that influence subsequent image captures.
 
@@ -163,6 +172,15 @@ pub trait AbstractCamera {
     // as they become available in the camera.
     async fn set_update_interval(&mut self, update_interval: Duration)
                                  -> Result<(), CanonicalError>;
+
+    // If binning()==2, determines whether the 2x2 binning is done on-chip or
+    // in ISP pipeline (when true) or the 2x2 binning is done in software post-
+    // processing (when false).
+    // If binning()==1 this parameter is ignored.
+    // Hardware/ISP binning is faster but for color sensors might result in some
+    // S/N loss (TBD).
+    async fn set_hardware_binning(&mut self, hw_binning: bool)
+                                  -> Result<(), CanonicalError>;
 
     // Action methods.
 

@@ -88,6 +88,11 @@ impl AbstractCamera for ImageCamera {
         Gain::new(50)
     }
 
+    fn binning(&self) -> u32 { 1 }
+
+    async fn set_hardware_binning(&mut self, _hw_binning: bool)
+                                  -> Result<(), CanonicalError> { Ok(()) }
+
     async fn set_exposure_duration(&mut self, _exp_duration: Duration)
                                    -> Result<(), CanonicalError> {
         Ok(())  // Quietly ignore.

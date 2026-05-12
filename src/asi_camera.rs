@@ -407,6 +407,11 @@ impl AbstractCamera for ASICamera {
         Gain::new((100.0 * frac) as i32)
     }
 
+    fn binning(&self) -> u32 { 1 }
+
+    async fn set_hardware_binning(&mut self, _hw_binning: bool)
+                                  -> Result<(), CanonicalError> { Ok(()) }
+
     async fn set_exposure_duration(&mut self, exp_duration: Duration)
                              -> Result<(), CanonicalError> {
         let mut locked_state = self.state.lock().await;
