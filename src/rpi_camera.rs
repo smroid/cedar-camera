@@ -32,6 +32,7 @@ use libcamera::{
 };
 use log::{debug, info, warn};
 
+use cedar_detect::image_funcs::bin_2x2;
 use crate::{
     abstract_camera::{
         AbstractCamera, CaptureParams, CapturedImage, EnumeratedCameraInfo,
@@ -146,7 +147,7 @@ impl RpiCamera {
 
     // Returns a RpiCamera instance that implements the AbstractCamera API.
     // `camera_index` is w.r.t. the enumerate_cameras() vector length.
-    pub async fn new(camera_index: usize) -> Result<Self, CanonicalError> {
+    pub async fn new(camera_index: usize, prefer_binned: bool) -> Result<Self, CanonicalError> {
         let mgr = CameraManager::new().unwrap();
         let cameras = mgr.cameras();
         let cam = cameras.get(camera_index).unwrap();
@@ -244,7 +245,7 @@ impl RpiCamera {
             sensor_height: height as f32 * pixel_size_nanometers.height as f32
                 / 1000000.0,
             is_color,
-            binning: 1,  // TODO: set from prefer_binned arg
+            binning: if prefer_binned { 2 } else { 1 },
             state: Arc::new(tokio::sync::Mutex::new(SharedState {
                 camera_index,
                 model: model.to_string(),
@@ -627,7 +628,8 @@ impl RpiCamera {
     // The first call to capture_image() starts the capture thread that
     // executes this function.
     async fn worker(state: Arc<tokio::sync::Mutex<SharedState>>,
-                    stop_request: Arc<AtomicBool>) {
+                    stop_request: Arc<AtomicBool>,
+                    binning: u32) {
         info!("Starting RpiCamera worker");
 
         // Whenever we change the camera settings, we will have discarded the
@@ -906,9 +908,12 @@ impl RpiCamera {
                     is_packed,
                 );
             }
-            let image =
-                GrayImage::from_raw(width as u32, height as u32, image_data)
-                    .unwrap();
+            let image = {
+                let full =
+                    GrayImage::from_raw(width as u32, height as u32, image_data)
+                        .unwrap();
+                if binning == 2 { bin_2x2(&full) } else { full }
+            };
 
             // Handle request re-queueing or collection during pipeline
             // draining.
@@ -1085,6 +1090,7 @@ impl RpiCamera {
         if self.capture_thread.is_none() {
             let cloned_state = self.state.clone();
             let cloned_stop_request = self.stop_request.clone();
+            let copied_binning = self.binning;
             // Allocate a thread for concurrent execution of image acquisition
             // and uncompressing with other activities.
             self.capture_thread = Some(std::thread::spawn(move || {
@@ -1095,7 +1101,7 @@ impl RpiCamera {
                     .build()
                     .unwrap();
                 runtime.block_on(async move {
-                    Self::worker(cloned_state, cloned_stop_request).await;
+                    Self::worker(cloned_state, cloned_stop_request, copied_binning).await;
                 });
             }));
         }

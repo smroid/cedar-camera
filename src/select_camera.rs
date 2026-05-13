@@ -64,7 +64,7 @@ pub async fn select_camera(
             Ok(Box::new(ASICamera::new(camera_index).await?))
         },
         Some(CameraInterface::Rpi) => {
-            Ok(Box::new(RpiCamera::new(camera_index).await?))
+            Ok(Box::new(RpiCamera::new(camera_index, prefer_binned).await?))
         },
     }
 }
