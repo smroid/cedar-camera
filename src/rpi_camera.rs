@@ -245,7 +245,12 @@ impl RpiCamera {
             sensor_height: height as f32 * pixel_size_nanometers.height as f32
                 / 1000000.0,
             is_color,
-            binning: if prefer_binned { 2 } else { 1 },
+            binning: if prefer_binned {
+                info!("Using 2x2 software binning");
+                2
+            } else {
+                1
+            },
             state: Arc::new(tokio::sync::Mutex::new(SharedState {
                 camera_index,
                 model: model.to_string(),
@@ -629,7 +634,7 @@ impl RpiCamera {
     // executes this function.
     async fn worker(state: Arc<tokio::sync::Mutex<SharedState>>,
                     stop_request: Arc<AtomicBool>,
-                    binning: u32) {
+                    binning: u32, is_color: bool) {
         info!("Starting RpiCamera worker");
 
         // Whenever we change the camera settings, we will have discarded the
@@ -1030,6 +1035,7 @@ impl RpiCamera {
                     params_accurate: mark_image_count == 0,
                     image: Arc::new(image),
                     binning,
+                    is_color,
                     readout_time,
                     readout_instant,
                     processing_duration: Some(last_frame_time.unwrap().elapsed()),
@@ -1092,6 +1098,7 @@ impl RpiCamera {
             let cloned_state = self.state.clone();
             let cloned_stop_request = self.stop_request.clone();
             let copied_binning = self.binning;
+            let copied_is_color = self.is_color;
             // Allocate a thread for concurrent execution of image acquisition
             // and uncompressing with other activities.
             self.capture_thread = Some(std::thread::spawn(move || {
@@ -1102,7 +1109,8 @@ impl RpiCamera {
                     .build()
                     .unwrap();
                 runtime.block_on(async move {
-                    Self::worker(cloned_state, cloned_stop_request, copied_binning).await;
+                    Self::worker(cloned_state, cloned_stop_request, copied_binning,
+                                 copied_is_color).await;
                 });
             }));
         }

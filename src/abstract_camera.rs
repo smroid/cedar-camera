@@ -104,6 +104,10 @@ pub struct CapturedImage {
     /// AbstractCamera::binning() on the camera that captured this image.
     pub binning: u32,
 
+    /// Whether `image` is from a color (Bayer pattern) sensor. Matches the
+    /// value of AbstractCamera::is_color() on the camera that captured this image.
+    pub is_color: bool,
+
     pub readout_time: SystemTime,
     pub readout_instant: Instant,
 

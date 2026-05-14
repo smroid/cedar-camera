@@ -298,6 +298,7 @@ impl ASICamera {
                 params_accurate: mark_image_count == 0,
                 image: Arc::new(image),
                 binning: 1,
+                is_color: false,
                 readout_time: SystemTime::now(),
                 readout_instant: Instant::now(),
                 processing_duration: None,
