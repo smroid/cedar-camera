@@ -55,6 +55,7 @@ impl ImageCamera {
             },
             params_accurate: true,
             image: Arc::new(image),
+            binning: 1,
             readout_time: SystemTime::now(),
             readout_instant: Instant::now(),
             processing_duration: None,

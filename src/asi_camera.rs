@@ -297,6 +297,7 @@ impl ASICamera {
                 capture_params: locked_state.camera_settings,
                 params_accurate: mark_image_count == 0,
                 image: Arc::new(image),
+                binning: 1,
                 readout_time: SystemTime::now(),
                 readout_instant: Instant::now(),
                 processing_duration: None,

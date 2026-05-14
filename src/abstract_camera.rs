@@ -100,6 +100,10 @@ pub struct CapturedImage {
     /// resulting in `image` being reduced resolution 8-bit monochrome.
     pub image: Arc<GrayImage>,
 
+    /// The binning factor applied to produce `image`. Matches the value of
+    /// AbstractCamera::binning() on the camera that captured this image.
+    pub binning: u32,
+
     pub readout_time: SystemTime,
     pub readout_instant: Instant,
 

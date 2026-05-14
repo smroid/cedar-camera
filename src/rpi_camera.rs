@@ -1029,6 +1029,7 @@ impl RpiCamera {
                     },
                     params_accurate: mark_image_count == 0,
                     image: Arc::new(image),
+                    binning,
                     readout_time,
                     readout_instant,
                     processing_duration: Some(last_frame_time.unwrap().elapsed()),
