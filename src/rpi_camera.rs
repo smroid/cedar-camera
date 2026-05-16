@@ -50,6 +50,7 @@ pub type ConvertFn = fn(
     is_10_bit: bool,
     is_12_bit: bool,
     is_packed: bool,
+    do_bin_2x2: bool,
 );
 static CONVERT_FN: OnceLock<ConvertFn> = OnceLock::new();
 pub fn set_converter(func: ConvertFn) {
@@ -519,6 +520,14 @@ impl RpiCamera {
     // * CedarDetect usually does 2x2 binning prior to running its star
     //   detection algorithm, so the R/G/B values are roughly converted to luma
     //   in the binning process.
+    // stride:     row stride of buf_data in bytes.
+    // buf_data:   raw sensor data in the camera's native pixel format;
+    //             height*stride bytes total, width pixels of data per row.
+    // image_data: output buffer; must be width*height bytes if !do_bin_2x2,
+    //             or (width/2)*(height/2) bytes if do_bin_2x2.
+    // is_10_bit / is_12_bit / is_16_bit: exactly one true, or all false for 8-bit.
+    // is_packed:  true for CSI-2 packed formats (e.g. RAW10P, RAW12P).
+    // do_bin_2x2: if true, 2x2 average-bin while converting; output is half size.
     fn convert_to_8bit(
         stride: usize,
         buf_data: &[u8],
@@ -529,104 +538,102 @@ impl RpiCamera {
         is_12_bit: bool,
         is_16_bit: bool,
         is_packed: bool,
+        do_bin_2x2: bool,
     ) {
-        // Handle 8-bit format: no conversion needed, direct copy.
-        if !is_10_bit && !is_12_bit && !is_16_bit {
-            // For 8-bit, stride should equal width (1 byte per pixel).
-            if stride == width {
-                // Simple copy for contiguous data.
+        // Use optimized function if we have one (handles binning too).
+        if !is_16_bit {
+            if let Some(f) = CONVERT_FN.get() {
+                f(
+                    stride, buf_data, image_data, width, height, is_10_bit,
+                    is_12_bit, is_packed, do_bin_2x2,
+                );
+                return;
+            }
+        }
+
+        // Reference implementation: convert to 8-bit into a temporary full-size
+        // buffer, then bin if requested.
+        let mut tmp: Vec<u8>;
+        let full: &[u8] = if !is_10_bit && !is_12_bit && !is_16_bit {
+            // Already 8-bit; reference directly into buf_data if stride==width,
+            // otherwise copy row-by-row into tmp.
+            if stride == width && !do_bin_2x2 {
                 image_data[..width * height]
                     .copy_from_slice(&buf_data[..width * height]);
-            } else {
-                // Copy row by row if there's stride padding.
-                for row in 0..height {
-                    let src_start = row * stride;
-                    let dst_start = row * width;
-                    image_data[dst_start..dst_start + width].copy_from_slice(
-                        &buf_data[src_start..src_start + width],
-                    );
-                }
+                return;
             }
-            return;
-        }
-
-        if is_16_bit {
-            // Convert from unpacked 16 bit to 8 bit.
-            // Assuming little-endian, the most significant byte is at index 1 of the 2-byte sequence.
+            tmp = vec![0u8; width * height];
+            for row in 0..height {
+                let src = row * stride;
+                let dst = row * width;
+                tmp[dst..dst + width].copy_from_slice(&buf_data[src..src + width]);
+            }
+            &tmp
+        } else if is_16_bit {
+            tmp = vec![0u8; width * height];
             for row in 0..height {
                 let buf_row_start = row * stride;
-                let buf_row_end = buf_row_start + width * 2;
                 let pix_row_start = row * width;
-                let pix_row_end = pix_row_start + width;
-                for (src_chunk, dst) in buf_data[buf_row_start..buf_row_end]
+                for (src_chunk, dst) in buf_data[buf_row_start..buf_row_start + width * 2]
                     .chunks_exact(2)
-                    .zip(image_data[pix_row_start..pix_row_end].iter_mut())
+                    .zip(tmp[pix_row_start..pix_row_start + width].iter_mut())
                 {
-                    *dst = src_chunk[1];
+                    *dst = src_chunk[1]; // keep high byte (little-endian)
                 }
             }
-            return;
-        }
-
-        // Use optimized function if we have one.
-        if let Some(f) = CONVERT_FN.get() {
-            f(
-                stride, buf_data, image_data, width, height, is_10_bit,
-                is_12_bit, is_packed,
-            );
-            return;
-        }
-        if !is_packed {
-            panic!("Unpacked raw format not yet supported");
-        }
-        if is_10_bit {
-            // Convert from packed 10 bit to 8 bit.
+            &tmp
+        } else if is_10_bit {
+            assert!(is_packed, "Unpacked 10-bit raw not yet supported");
+            tmp = vec![0u8; width * height];
             for row in 0..height {
                 let buf_row_start = row * stride;
-                let buf_row_end = buf_row_start + width * 5 / 4;
                 let pix_row_start = row * width;
-                let pix_row_end = pix_row_start + width;
                 for (buf_chunk, pix_chunk) in
-                    buf_data[buf_row_start..buf_row_end].chunks_exact(5).zip(
-                        image_data[pix_row_start..pix_row_end]
-                            .chunks_exact_mut(4),
-                    )
+                    buf_data[buf_row_start..buf_row_start + width * 5 / 4]
+                        .chunks_exact(5)
+                        .zip(tmp[pix_row_start..pix_row_start + width].chunks_exact_mut(4))
                 {
-                    // Keep upper 8 bits; discard 2 lsb.
-                    let pix0 = buf_chunk[0];
-                    let pix1 = buf_chunk[1];
-                    let pix2 = buf_chunk[2];
-                    let pix3 = buf_chunk[3];
-                    // pix4 has the lsb values, which we discard.
-                    pix_chunk[0] = pix0;
-                    pix_chunk[1] = pix1;
-                    pix_chunk[2] = pix2;
-                    pix_chunk[3] = pix3;
+                    pix_chunk[0] = buf_chunk[0];
+                    pix_chunk[1] = buf_chunk[1];
+                    pix_chunk[2] = buf_chunk[2];
+                    pix_chunk[3] = buf_chunk[3];
+                }
+            }
+            &tmp
+        } else {
+            assert!(is_12_bit, "Expected 12-bit format");
+            assert!(is_packed, "Unpacked 12-bit raw not yet supported");
+            tmp = vec![0u8; width * height];
+            for row in 0..height {
+                let buf_row_start = row * stride;
+                let pix_row_start = row * width;
+                for (buf_chunk, pix_pair) in
+                    buf_data[buf_row_start..buf_row_start + width * 3 / 2]
+                        .chunks_exact(3)
+                        .zip(tmp[pix_row_start..pix_row_start + width].chunks_exact_mut(2))
+                {
+                    pix_pair[0] = buf_chunk[0];
+                    pix_pair[1] = buf_chunk[1];
+                }
+            }
+            &tmp
+        };
+
+        if do_bin_2x2 {
+            // 2x2 average bin: output is (width/2) x (height/2).
+            let out_w = width / 2;
+            let out_h = height / 2;
+            for oy in 0..out_h {
+                for ox in 0..out_w {
+                    let tl = full[(oy * 2) * width + ox * 2] as u16;
+                    let tr = full[(oy * 2) * width + ox * 2 + 1] as u16;
+                    let bl = full[(oy * 2 + 1) * width + ox * 2] as u16;
+                    let br = full[(oy * 2 + 1) * width + ox * 2 + 1] as u16;
+                    image_data[oy * out_w + ox] = ((tl + tr + bl + br) / 4) as u8;
                 }
             }
         } else {
-            // Must be 12-bit since we handled 8-bit and 10-bit above
-            assert!(is_12_bit, "Expected 12-bit format");
-            // Convert from packed 12 bit to 8 bit.
-            for row in 0..height {
-                let buf_row_start = row * stride;
-                let buf_row_end = buf_row_start + width * 3 / 2;
-                let pix_row_start = row * width;
-                let pix_row_end = pix_row_start + width;
-                for (buf_chunk, pix_pair) in
-                    buf_data[buf_row_start..buf_row_end].chunks_exact(3).zip(
-                        image_data[pix_row_start..pix_row_end]
-                            .chunks_exact_mut(2),
-                    )
-                {
-                    // Keep upper 8 bits; discard 4 lsb.
-                    let pix0 = buf_chunk[0];
-                    let pix1 = buf_chunk[1];
-                    // pix2 has the lsb values, which we discard.
-                    pix_pair[0] = pix0;
-                    pix_pair[1] = pix1;
-                }
-            }
+            image_data[..width * height].copy_from_slice(full);
         }
     }
 
@@ -884,22 +891,31 @@ impl RpiCamera {
 
             // Allocate uninitialized storage to receive the converted image
             // data.
-            let num_pixels = width * height;
-            let mut image_data = Vec::<u8>::with_capacity(num_pixels);
-            #[allow(clippy::uninit_vec)]
-            unsafe {
-                image_data.set_len(num_pixels)
-            }
+            let do_bin_2x2 = binning == 2;
+            let (out_w, out_h) = if do_bin_2x2 {
+                (width / 2, height / 2)
+            } else {
+                (width, height)
+            };
+            let mut image_data = vec![0u8; out_w * out_h];
 
             if pisp_compressed {
+                let mut full = vec![0u8; width * height];
                 pisp_compression::uncompress(
                     stride,
                     buf_data,
-                    &mut image_data,
+                    &mut full,
                     width,
                     height,
                     pisp_compression_mode,
                 );
+                if do_bin_2x2 {
+                    let full_img =
+                        GrayImage::from_raw(width as u32, height as u32, full).unwrap();
+                    image_data = bin_2x2(&full_img).into_raw();
+                } else {
+                    image_data = full;
+                }
             } else {
                 Self::convert_to_8bit(
                     stride,
@@ -911,14 +927,10 @@ impl RpiCamera {
                     is_12_bit,
                     is_16_bit,
                     is_packed,
+                    do_bin_2x2,
                 );
             }
-            let image = {
-                let full =
-                    GrayImage::from_raw(width as u32, height as u32, image_data)
-                        .unwrap();
-                if binning == 2 { bin_2x2(&full) } else { full }
-            };
+            let image = GrayImage::from_raw(out_w as u32, out_h as u32, image_data).unwrap();
 
             // Handle request re-queueing or collection during pipeline
             // draining.
