@@ -664,12 +664,11 @@ impl RpiCamera {
         let mut cfgs = Self::get_camera_configs(&cam)
             .expect("Failed to get camera configs in worker");
 
-        // Increase buffer count by 1 to allow re-queueing before processing
-        // completes.
+        // Set the buffer count to pipeline_depth + 1 to allow re-queueing
+        // before processing completes.
         {
             let mut cfg = cfgs.get_mut(0).unwrap();
-            let original_buffer_count = cfg.get_buffer_count();
-            cfg.set_buffer_count(original_buffer_count + 1);
+            cfg.set_buffer_count(pipeline_depth + 1);
         }
 
         active_cam
