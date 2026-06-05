@@ -18,7 +18,7 @@ tokio = { version = "1.35.1", features = ["macros", "rt-multi-thread", "sync", "
 async-trait = "0.1.77"
 futures = "0.3.30"
 libcamera = { version = "0.3.0", path = "./libcamera-rs/libcamera" }
-imageproc = "0.25.0"
+imageproc = "0.27.0"
 fast_image_resize = "4.0.0"
 libc = "0.2"
 
