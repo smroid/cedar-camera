@@ -1112,7 +1112,7 @@ impl AbstractCamera for RpiCamera {
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
         loop {
-            let mut sleep_duration = Duration::from_millis(5);
+            let mut sleep_duration = Duration::from_millis(1);
             {
                 let locked_state = self.state.lock().await;
                 if locked_state.most_recent_capture.is_some()
