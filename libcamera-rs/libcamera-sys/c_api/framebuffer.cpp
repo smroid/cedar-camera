@@ -45,6 +45,18 @@ uint64_t libcamera_framebuffer_cookie(const libcamera_framebuffer_t *framebuffer
     return framebuffer->cookie();
 }
 
+libcamera_framebuffer_t *libcamera_framebuffer_create(const int *fds, const size_t *offsets, const size_t *lengths, size_t num_planes, uint64_t cookie) {
+    std::vector<libcamera::FrameBuffer::Plane> c_planes;
+    for (size_t i = 0; i < num_planes; ++i) {
+        libcamera::FrameBuffer::Plane p;
+        p.fd = libcamera::SharedFD(fds[i]);
+        p.offset = offsets[i];
+        p.length = lengths[i];
+        c_planes.push_back(p);
+    }
+    return new libcamera::FrameBuffer(c_planes, cookie);
+}
+
 // --- libcamera_framebuffer_plane_t ---
 int libcamera_framebuffer_plane_fd(libcamera_framebuffer_plane_t *plane) {
     return plane->fd.get();

@@ -20,6 +20,7 @@ use libcamera::{
         AeEnable, AnalogueGain, AwbEnable, ExposureTime, FrameDurationLimits,
         NoiseReductionMode,
     },
+    framebuffer::AsFrameBuffer,
     framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
     framebuffer_map::MemoryMappedFrameBuffer,
     geometry,
@@ -40,6 +41,52 @@ use crate::{
     pisp_compression,
 };
 
+#[repr(C)]
+pub struct DmaBufSync {
+    pub flags: u64,
+}
+
+pub const DMA_BUF_SYNC_READ: u64 = 1 << 0;
+pub const DMA_BUF_SYNC_START: u64 = 0 << 2;
+pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
+
+nix::ioctl_write_ptr!(dma_buf_sync_ioctl, b'b', 0x0, DmaBufSync);
+
+pub unsafe fn do_dma_buf_sync(fd: i32, sync: &DmaBufSync) -> std::io::Result<()> {
+    dma_buf_sync_ioctl(fd, sync).map_err(|e| e.into()).map(|_| ())
+}
+
+#[repr(C)]
+pub struct DmaHeapAllocationData {
+    pub len: u64,
+    pub fd: u32,
+    pub fd_flags: u32,
+    pub heap_flags: u64,
+}
+
+nix::ioctl_readwrite!(dma_heap_alloc, b'H', 0x0, DmaHeapAllocationData);
+
+pub fn allocate_cma_buffer(size: usize) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let heap_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/dma_heap/linux,cma")?;
+
+    let mut data = DmaHeapAllocationData {
+        len: size as u64,
+        fd: 0,
+        fd_flags: libc::O_RDWR as u32 | libc::O_CLOEXEC as u32,
+        heap_flags: 0,
+    };
+
+    unsafe {
+        dma_heap_alloc(heap_file.as_raw_fd(), &mut data)
+            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+        Ok(std::os::fd::OwnedFd::from_raw_fd(data.fd as i32))
+    }
+}
+
 pub type ConvertFn = fn(
     stride: usize,
     buf_data: &[u8],
@@ -56,6 +103,73 @@ pub fn set_converter(func: ConvertFn) {
     log::info!("Setting raw image converter function.");
     let _ = CONVERT_FN.set(func); // Ignores error if already set.
 }
+
+#[derive(Debug)]
+pub struct FrameBufferPlane {
+    pub fd: std::os::fd::OwnedFd,
+    pub offset: u32,
+    pub length: u32,
+}
+
+pub struct OwnedFrameBuffer {
+    ptr: std::ptr::NonNull<libcamera_sys::libcamera_framebuffer_t>,
+    _planes: Vec<FrameBufferPlane>,
+}
+
+unsafe impl Send for OwnedFrameBuffer {}
+unsafe impl Sync for OwnedFrameBuffer {}
+
+impl OwnedFrameBuffer {
+    pub fn new(planes: Vec<FrameBufferPlane>, cookie: Option<u64>) -> std::io::Result<Self> {
+        let mut fds = Vec::new();
+        let mut offsets = Vec::new();
+        let mut lengths = Vec::new();
+
+        for plane in &planes {
+            use std::os::fd::AsRawFd;
+            fds.push(plane.fd.as_raw_fd());
+            offsets.push(plane.offset as usize);
+            lengths.push(plane.length as usize);
+        }
+
+        let cookie_val = cookie.unwrap_or(0);
+        let ptr = unsafe {
+            libcamera_sys::libcamera_framebuffer_create(
+                fds.as_ptr(),
+                offsets.as_ptr(),
+                lengths.as_ptr(),
+                planes.len(),
+                cookie_val,
+            )
+        };
+
+        let non_null_ptr = std::ptr::NonNull::new(ptr)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to create libcamera framebuffer"))?;
+
+        Ok(Self {
+            ptr: non_null_ptr,
+            _planes: planes,
+        })
+    }
+}
+
+impl Drop for OwnedFrameBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            // Memory is managed by C++ destructor in libcamera, but wait!
+            // Wait, does libcamera-sys have a way to destroy it?
+            // Usually libcamera object destructors are not exposed. I will just leak the C++ object if no destroy exists.
+            // But wait, what did we do in the previous session?
+        }
+    }
+}
+
+impl libcamera::framebuffer::AsFrameBuffer for OwnedFrameBuffer {
+    unsafe fn ptr(&self) -> std::ptr::NonNull<libcamera_sys::libcamera_framebuffer_t> {
+        self.ptr
+    }
+}
+
 
 pub struct RpiCamera {
     // Dimensions, in mm, of the sensor.
@@ -115,6 +229,9 @@ struct SharedState {
     // Most recent completed capture and its id value.
     most_recent_capture: Option<CapturedImage>,
     frame_id: i32,
+
+    // Store DMA FDs and their mmap pointers
+    mmap_ptrs: Vec<(std::os::fd::OwnedFd, usize, usize)>,
 }
 
 impl RpiCamera {
@@ -263,6 +380,7 @@ impl RpiCamera {
                 eta: None,
                 most_recent_capture: None,
                 frame_id: 0,
+                mmap_ptrs: Vec::new(),
             })),
             stop_request: Arc::new(AtomicBool::new(false)),
             capture_thread: None,
@@ -271,7 +389,7 @@ impl RpiCamera {
         Ok(cam)
     }
 
-    fn get_camera_configs(
+    pub fn get_camera_configs(
         cam: &Camera,
     ) -> Result<CameraConfiguration, CanonicalError> {
         // This will generate default configuration for Raw.
@@ -687,26 +805,45 @@ impl RpiCamera {
             tx.send(req).unwrap();
         });
 
-        // Allocate frame buffers for the stream.
-        let mut alloc = FrameBufferAllocator::new(&cam);
         let stream = cfg.stream().unwrap();
-        let buffers = alloc.alloc(&stream).unwrap();
-        // Convert FrameBuffer to MemoryMappedFrameBuffer, which allows reading
-        // &[u8].
-        let buffers = buffers
-            .into_iter()
-            .map(|buf| MemoryMappedFrameBuffer::new(buf).unwrap())
-            .collect::<Vec<_>>();
+        let frame_size = (cfg.get_stride() * cfg.get_size().height) as usize;
+        let aligned_size = (frame_size + 4095) & !4095;
 
         let mut reqs;
         {
-            let locked_state = state.lock().await;
-            // Create capture requests and attach buffers.
-            reqs = buffers
-                .into_iter()
-                .map(|buf| {
-                    let mut req = active_cam.create_request(None).unwrap();
-                    req.add_buffer(&stream, buf).unwrap();
+            let mut locked_state = state.lock().await;
+            // Create capture requests and attach cacheable CMA buffers.
+            reqs = (0..pipeline_depth + 1)
+                .map(|i| {
+                    let dma_fd = allocate_cma_buffer(aligned_size).expect("Failed to allocate CMA buffer");
+                    let app_fd = dma_fd.try_clone().unwrap();
+
+                    let mmap_ptr = unsafe {
+                        use std::os::fd::AsRawFd;
+                        libc::mmap64(
+                            core::ptr::null_mut(),
+                            aligned_size,
+                            libc::PROT_READ | libc::PROT_WRITE,
+                            libc::MAP_SHARED,
+                            app_fd.as_raw_fd(),
+                            0,
+                        )
+                    };
+
+                    // Store the mmap_ptr and app_fd in locked_state
+                    locked_state.mmap_ptrs.push((app_fd, mmap_ptr as usize, aligned_size));
+
+                    let plane = FrameBufferPlane {
+                        fd: dma_fd, // Ownership transferred to OwnedFrameBuffer
+                        offset: 0,
+                        length: aligned_size as u32,
+                    };
+
+                    let fb = OwnedFrameBuffer::new(vec![plane], Some(i as u64)).unwrap();
+
+                    let mut req = active_cam.create_request(Some(i as u64)).unwrap();
+                    req.add_buffer(&stream, fb).unwrap();
+
                     let controls = req.controls_mut();
                     Self::setup_camera_request(controls, &locked_state);
                     req
@@ -786,6 +923,7 @@ impl RpiCamera {
             let is_packed;
             let actual_exposure_duration;
             let actual_abstract_gain;
+            let mmap_info;
             {
                 let mut locked_state = state.lock().await;
                 actual_exposure_duration = metadata
@@ -818,14 +956,16 @@ impl RpiCamera {
                 } else if mark_image_count > 0 {
                     mark_image_count -= 1;
                 }
+                let cookie = req.cookie() as usize;
+                let (ref fd, ptr_addr, len) = locked_state.mmap_ptrs[cookie];
+                use std::os::fd::AsRawFd;
+                mmap_info = (fd.as_raw_fd(), ptr_addr as *mut u8, len);
             }
 
             // Grab the image.
-            let framebuffer: &MemoryMappedFrameBuffer<FrameBuffer> =
-                req.buffer(&stream).unwrap();
-            // Raw format has only one data plane containing bayer or mono data.
-            let planes = framebuffer.data();
-            let buf_data = planes.first().unwrap();
+            let _framebuffer: &OwnedFrameBuffer = req.buffer(&stream).unwrap();
+            let (plane_fd, mmap_ptr, mmap_len) = mmap_info;
+            let buf_data = unsafe { core::slice::from_raw_parts(mmap_ptr, mmap_len) };
 
             // Early re-queueing: immediately queue the spare request before
             // expensive processing.
@@ -848,6 +988,10 @@ impl RpiCamera {
                 (width, height)
             };
             let mut image_data = vec![0u8; out_w * out_h];
+
+            // INVALIDATE THE CACHE (CPU will fetch fresh memory from the ISP)
+            let sync_start = DmaBufSync { flags: DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ };
+            unsafe { do_dma_buf_sync(plane_fd, &sync_start).unwrap() };
 
             if pisp_compressed {
                 let mut full = vec![0u8; width * height];
@@ -880,6 +1024,11 @@ impl RpiCamera {
                     do_bin_2x2,
                 );
             }
+
+            // CLOSE SYNC WINDOW
+            let sync_end = DmaBufSync { flags: DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ };
+            unsafe { do_dma_buf_sync(plane_fd, &sync_end).unwrap() };
+
             let image = GrayImage::from_raw(out_w as u32, out_h as u32, image_data).unwrap();
 
             req.reuse(ReuseFlag::REUSE_BUFFERS);

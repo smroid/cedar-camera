@@ -56,6 +56,8 @@ const libcamera_framebuffer_planes_t *libcamera_framebuffer_planes(const libcame
 const libcamera_frame_metadata_t *libcamera_framebuffer_metadata(const libcamera_framebuffer_t *framebuffer);
 uint64_t libcamera_framebuffer_cookie(const libcamera_framebuffer_t *framebuffer);
 
+libcamera_framebuffer_t *libcamera_framebuffer_create(const int *fds, const size_t *offsets, const size_t *lengths, size_t num_planes, uint64_t cookie);
+
 // --- libcamera_framebuffer_plane_t ---
 int libcamera_framebuffer_plane_fd(libcamera_framebuffer_plane_t *plane);
 size_t libcamera_framebuffer_plane_offset(const libcamera_framebuffer_plane_t *plane);
