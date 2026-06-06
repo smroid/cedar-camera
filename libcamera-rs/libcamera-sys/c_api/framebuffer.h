@@ -56,6 +56,16 @@ const libcamera_framebuffer_planes_t *libcamera_framebuffer_planes(const libcame
 const libcamera_frame_metadata_t *libcamera_framebuffer_metadata(const libcamera_framebuffer_t *framebuffer);
 uint64_t libcamera_framebuffer_cookie(const libcamera_framebuffer_t *framebuffer);
 
+// Construct a FrameBuffer from a single externally-allocated dma-buf plane.
+// `fd` is duplicated internally (via SharedFD), so the caller retains ownership
+// of the original fd. Returns NULL on allocation failure.
+// The returned buffer must be released with libcamera_framebuffer_destroy().
+libcamera_framebuffer_t *libcamera_framebuffer_create_single_plane(int fd, size_t offset, size_t length, uint64_t cookie);
+
+// Destroy a FrameBuffer created with libcamera_framebuffer_create_single_plane.
+// Do NOT call this on FrameBuffers owned by a FrameBufferAllocator.
+void libcamera_framebuffer_destroy(libcamera_framebuffer_t *framebuffer);
+
 // --- libcamera_framebuffer_plane_t ---
 int libcamera_framebuffer_plane_fd(libcamera_framebuffer_plane_t *plane);
 size_t libcamera_framebuffer_plane_offset(const libcamera_framebuffer_plane_t *plane);

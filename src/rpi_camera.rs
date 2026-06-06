@@ -20,7 +20,7 @@ use libcamera::{
         AeEnable, AnalogueGain, AwbEnable, ExposureTime, FrameDurationLimits,
         NoiseReductionMode,
     },
-    framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
+    framebuffer_imported::ImportedFrameBuffer,
     framebuffer_map::MemoryMappedFrameBuffer,
     geometry,
     logging::{log_set_target, LoggingTarget},
@@ -37,6 +37,7 @@ use crate::{
         AbstractCamera, CaptureParams, CapturedImage, EnumeratedCameraInfo,
         Gain, Offset,
     },
+    dma_heap::{self, DmaHeap},
     pisp_compression,
 };
 
@@ -666,9 +667,10 @@ impl RpiCamera {
 
         // Set the buffer count to pipeline_depth + 1 to allow re-queueing
         // before processing completes.
+        let num_buffers = (pipeline_depth + 1) as usize;
         {
             let mut cfg = cfgs.get_mut(0).unwrap();
-            cfg.set_buffer_count(pipeline_depth + 1);
+            cfg.set_buffer_count(num_buffers as u32);
         }
 
         active_cam
@@ -676,6 +678,7 @@ impl RpiCamera {
             .expect("Failed to configure camera");
         let cfg = cfgs.get(0).unwrap();
         let stride = cfg.get_stride() as usize;
+        let frame_size = cfg.get_frame_size() as usize;
 
         // Log the selected format.
         info!("Using camera format: {:?}", cfg.get_pixel_format());
@@ -687,16 +690,23 @@ impl RpiCamera {
             tx.send(req).unwrap();
         });
 
-        // Allocate frame buffers for the stream.
-        let mut alloc = FrameBufferAllocator::new(&cam);
+        // Allocate frame buffers from the kernel CMA dma-heap (cached pages),
+        // and import them into libcamera. The default FrameBufferAllocator
+        // path produces uncached buffers (~130 MB/s reads); cached buffers run
+        // at full DRAM speed (~700 MB/s+). Cache coherency vs. camera DMA is
+        // maintained via DMA_BUF_IOCTL_SYNC bracketing the CPU read below.
+        let dma_heap = DmaHeap::open_cma()
+            .expect("Failed to open dma-heap (need /dev/dma_heap/linux,cma and `video` group)");
         let stream = cfg.stream().unwrap();
-        let buffers = alloc.alloc(&stream).unwrap();
-        // Convert FrameBuffer to MemoryMappedFrameBuffer, which allows reading
-        // &[u8].
-        let buffers = buffers
-            .into_iter()
-            .map(|buf| MemoryMappedFrameBuffer::new(buf).unwrap())
-            .collect::<Vec<_>>();
+        let buffers: Vec<MemoryMappedFrameBuffer<ImportedFrameBuffer>> = (0..num_buffers)
+            .map(|i| {
+                let fd = dma_heap.alloc(frame_size)
+                    .expect("dma-heap alloc failed");
+                let ifb = ImportedFrameBuffer::new(fd, 0, frame_size, i as u64)
+                    .expect("ImportedFrameBuffer::new failed");
+                MemoryMappedFrameBuffer::new(ifb).unwrap()
+            })
+            .collect();
 
         let mut reqs;
         {
@@ -821,11 +831,21 @@ impl RpiCamera {
             }
 
             // Grab the image.
-            let framebuffer: &MemoryMappedFrameBuffer<FrameBuffer> =
+            let framebuffer: &MemoryMappedFrameBuffer<ImportedFrameBuffer> =
                 req.buffer(&stream).unwrap();
             // Raw format has only one data plane containing bayer or mono data.
             let planes = framebuffer.data();
             let buf_data = planes.first().unwrap();
+            // Invalidate CPU caches so we see the freshly DMA'd camera data.
+            // Bracket CPU read access with cache-coherency ioctls. The guard
+            // calls SYNC END automatically on drop.
+            let dma_buf_fd = {
+                use libcamera::framebuffer::AsFrameBuffer;
+                framebuffer.planes().get(0).unwrap().fd()
+            };
+            let _sync_guard = dma_heap::DmaBufReadGuard::new(dma_buf_fd)
+                .map_err(|e| warn!("DMA_BUF_IOCTL_SYNC START failed: {:?}", e))
+                .ok();
 
             // Early re-queueing: immediately queue the spare request before
             // expensive processing.
@@ -880,6 +900,7 @@ impl RpiCamera {
                     do_bin_2x2,
                 );
             }
+            drop(_sync_guard);
             let image = GrayImage::from_raw(out_w as u32, out_h as u32, image_data).unwrap();
 
             req.reuse(ReuseFlag::REUSE_BUFFERS);
