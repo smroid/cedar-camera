@@ -41,22 +41,22 @@ use crate::{
 };
 
 #[repr(C)]
-pub struct DmaBufSync {
+struct DmaBufSync {
     pub flags: u64,
 }
 
-pub const DMA_BUF_SYNC_READ: u64 = 1 << 0;
-pub const DMA_BUF_SYNC_START: u64 = 0 << 2;
-pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
+const DMA_BUF_SYNC_READ: u64 = 1 << 0;
+const DMA_BUF_SYNC_START: u64 = 0 << 2;
+const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
 nix::ioctl_write_ptr!(dma_buf_sync_ioctl, b'b', 0x0, DmaBufSync);
 
-pub unsafe fn do_dma_buf_sync(fd: i32, sync: &DmaBufSync) -> std::io::Result<()> {
+unsafe fn do_dma_buf_sync(fd: i32, sync: &DmaBufSync) -> std::io::Result<()> {
     dma_buf_sync_ioctl(fd, sync).map_err(|e| e.into()).map(|_| ())
 }
 
 #[repr(C)]
-pub struct DmaHeapAllocationData {
+struct DmaHeapAllocationData {
     pub len: u64,
     pub fd: u32,
     pub fd_flags: u32,
@@ -65,7 +65,7 @@ pub struct DmaHeapAllocationData {
 
 nix::ioctl_readwrite!(dma_heap_alloc, b'H', 0x0, DmaHeapAllocationData);
 
-pub fn allocate_cma_buffer(size: usize) -> std::io::Result<std::os::fd::OwnedFd> {
+fn allocate_cma_buffer(size: usize) -> std::io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let heap_file = std::fs::OpenOptions::new()
         .read(true)
@@ -102,9 +102,6 @@ pub fn set_converter(func: ConvertFn) {
     log::info!("Setting raw image converter function.");
     let _ = CONVERT_FN.set(func); // Ignores error if already set.
 }
-
-
-
 
 pub struct RpiCamera {
     // Dimensions, in mm, of the sensor.
@@ -324,7 +321,7 @@ impl RpiCamera {
         Ok(cam)
     }
 
-    pub fn get_camera_configs(
+    fn get_camera_configs(
         cam: &Camera,
     ) -> Result<CameraConfiguration, CanonicalError> {
         // This will generate default configuration for Raw.
