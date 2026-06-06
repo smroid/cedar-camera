@@ -20,9 +20,8 @@ use libcamera::{
         AeEnable, AnalogueGain, AwbEnable, ExposureTime, FrameDurationLimits,
         NoiseReductionMode,
     },
-    framebuffer::AsFrameBuffer,
-    framebuffer_allocator::{FrameBuffer, FrameBufferAllocator},
-    framebuffer_map::MemoryMappedFrameBuffer,
+    framebuffer::{AsFrameBuffer, FrameBufferPlane, OwnedFrameBuffer},
+    framebuffer_allocator::FrameBufferAllocator,
     geometry,
     logging::{log_set_target, LoggingTarget},
     pixel_format::PixelFormat,
@@ -104,71 +103,7 @@ pub fn set_converter(func: ConvertFn) {
     let _ = CONVERT_FN.set(func); // Ignores error if already set.
 }
 
-#[derive(Debug)]
-pub struct FrameBufferPlane {
-    pub fd: std::os::fd::OwnedFd,
-    pub offset: u32,
-    pub length: u32,
-}
 
-pub struct OwnedFrameBuffer {
-    ptr: std::ptr::NonNull<libcamera_sys::libcamera_framebuffer_t>,
-    _planes: Vec<FrameBufferPlane>,
-}
-
-unsafe impl Send for OwnedFrameBuffer {}
-unsafe impl Sync for OwnedFrameBuffer {}
-
-impl OwnedFrameBuffer {
-    pub fn new(planes: Vec<FrameBufferPlane>, cookie: Option<u64>) -> std::io::Result<Self> {
-        let mut fds = Vec::new();
-        let mut offsets = Vec::new();
-        let mut lengths = Vec::new();
-
-        for plane in &planes {
-            use std::os::fd::AsRawFd;
-            fds.push(plane.fd.as_raw_fd());
-            offsets.push(plane.offset as usize);
-            lengths.push(plane.length as usize);
-        }
-
-        let cookie_val = cookie.unwrap_or(0);
-        let ptr = unsafe {
-            libcamera_sys::libcamera_framebuffer_create(
-                fds.as_ptr(),
-                offsets.as_ptr(),
-                lengths.as_ptr(),
-                planes.len(),
-                cookie_val,
-            )
-        };
-
-        let non_null_ptr = std::ptr::NonNull::new(ptr)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to create libcamera framebuffer"))?;
-
-        Ok(Self {
-            ptr: non_null_ptr,
-            _planes: planes,
-        })
-    }
-}
-
-impl Drop for OwnedFrameBuffer {
-    fn drop(&mut self) {
-        unsafe {
-            // Memory is managed by C++ destructor in libcamera, but wait!
-            // Wait, does libcamera-sys have a way to destroy it?
-            // Usually libcamera object destructors are not exposed. I will just leak the C++ object if no destroy exists.
-            // But wait, what did we do in the previous session?
-        }
-    }
-}
-
-impl libcamera::framebuffer::AsFrameBuffer for OwnedFrameBuffer {
-    unsafe fn ptr(&self) -> std::ptr::NonNull<libcamera_sys::libcamera_framebuffer_t> {
-        self.ptr
-    }
-}
 
 
 pub struct RpiCamera {
