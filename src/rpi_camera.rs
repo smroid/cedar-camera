@@ -105,7 +105,12 @@ struct SharedState {
     // effect when the current exposure finishes, influencing the following
     // exposures.
     camera_settings: CaptureParams,
-    setting_changed: bool,
+    // Non-zero while metadata has not yet confirmed new settings are in effect.
+    // Set to 1 by changed_setting() under the same lock that clears
+    // most_recent_capture, closing the race window where the worker could store
+    // a params_accurate=true frame between the setting change and the next
+    // frame arriving. Reset to 0 by compute_params_accurate() on match.
+    params_inaccurate_count: i32,
 
     // Zero means go fast as camera frames are available.
     update_interval: Duration,
@@ -259,7 +264,7 @@ impl RpiCamera {
                 is_16_bit,
                 is_packed,
                 camera_settings: CaptureParams::new(),
-                setting_changed: false,
+                params_inaccurate_count: 0,
                 update_interval: Duration::ZERO,
                 eta: None,
                 most_recent_capture: None,
@@ -465,7 +470,7 @@ impl RpiCamera {
     // capture_image() will wait for the setting change to be reflected in
     // the captured image stream.
     fn changed_setting(locked_state: &mut SharedState) {
-        locked_state.setting_changed = true;
+        locked_state.params_inaccurate_count = 1;
         locked_state.most_recent_capture = None;
     }
 
@@ -636,20 +641,6 @@ impl RpiCamera {
         // in-progress exposure, because the old settings were in effect when it
         // started. We need to mark dirty a number of images after a setting
         // change.
-        let pipeline_depth = match state.lock().await.model.as_str() {
-            // These values are determined empirically by using the
-            // exposure_sweep test program.
-            "imx477" => 6,
-            "imx219" => 4,
-            "imx290" => 5,
-            "imx296" => 4,
-            "ov5647" => 4,
-            "ov9281" => 3,
-            _ => 5,
-        };
-
-        // How many captured images we will mark with params_accurate=false.
-        let mut mark_image_count = 0;
         let mgr = CameraManager::new().unwrap();
 
         // Setting AeEnable(false) in setup_camera_request causes the libcamera
@@ -665,9 +656,9 @@ impl RpiCamera {
         let mut cfgs = Self::get_camera_configs(&cam)
             .expect("Failed to get camera configs in worker");
 
-        // Set the buffer count to pipeline_depth + 1 to allow re-queueing
-        // before processing completes.
-        let num_buffers = (pipeline_depth + 1) as usize;
+        // 3 buffers: one being processed by the CPU, one in-flight to the
+        // camera, one spare for immediate re-queue.
+        let num_buffers = 3;
         {
             let mut cfg = cfgs.get_mut(0).unwrap();
             cfg.set_buffer_count(num_buffers as u32);
@@ -797,7 +788,7 @@ impl RpiCamera {
             let actual_exposure_duration;
             let actual_abstract_gain;
             {
-                let mut locked_state = state.lock().await;
+                let locked_state = state.lock().await;
                 actual_exposure_duration = metadata
                     .get::<ExposureTime>()
                     .map(|ExposureTime(exp_us)| {
@@ -822,12 +813,6 @@ impl RpiCamera {
                 is_12_bit = locked_state.is_12_bit;
                 is_16_bit = locked_state.is_16_bit;
                 is_packed = locked_state.is_packed;
-                if locked_state.setting_changed {
-                    mark_image_count = pipeline_depth;
-                    locked_state.setting_changed = false;
-                } else if mark_image_count > 0 {
-                    mark_image_count -= 1;
-                }
             }
 
             // Grab the image.
@@ -848,12 +833,11 @@ impl RpiCamera {
                 .ok();
 
             // Early re-queueing: immediately queue the spare request before
-            // expensive processing.
+            // expensive processing. Detect setting changes here, at the point
+            // where new controls are actually sent to the camera.
             if let Some(mut spare) = spare_request.take() {
                 let controls = spare.controls_mut();
-                let locked_state = state.lock().await;
-                Self::setup_camera_request(controls, &locked_state);
-                drop(locked_state);
+                Self::setup_camera_request(controls, &*state.lock().await);
                 if let Err(e) = active_cam.queue_request(spare) {
                     warn!("Failed to queue spare request: {:?}", e);
                 }
@@ -909,39 +893,41 @@ impl RpiCamera {
             Self::setup_camera_request(controls, &locked_state);
             spare_request = Some(req);
 
-            if !locked_state.setting_changed {
-                locked_state.most_recent_capture = Some(CapturedImage {
-                    capture_params: CaptureParams {
-                        exposure_duration: actual_exposure_duration.unwrap_or(
-                            locked_state.camera_settings.exposure_duration,
-                        ),
-                        gain: Gain::new(actual_abstract_gain.unwrap_or(
-                            locked_state.camera_settings.gain.value(),
-                        )),
-                        offset: locked_state.camera_settings.offset,
-                    },
-                    params_accurate: mark_image_count == 0,
-                    image: Arc::new(image),
-                    binning,
-                    is_color,
-                    readout_time,
-                    readout_instant,
-                    processing_duration: Some(last_frame_time.unwrap().elapsed()),
-                });
-                locked_state.frame_id += 1;
+            locked_state.most_recent_capture = Some(CapturedImage {
+                capture_params: CaptureParams {
+                    exposure_duration: actual_exposure_duration.unwrap_or(
+                        locked_state.camera_settings.exposure_duration,
+                    ),
+                    gain: Gain::new(actual_abstract_gain.unwrap_or(
+                        locked_state.camera_settings.gain.value(),
+                    )),
+                    offset: locked_state.camera_settings.offset,
+                },
+                params_accurate: Self::compute_params_accurate(
+                    &mut locked_state,
+                    actual_exposure_duration,
+                    actual_abstract_gain,
+                ),
+                image: Arc::new(image),
+                binning,
+                is_color,
+                readout_time,
+                readout_instant,
+                processing_duration: Some(last_frame_time.unwrap().elapsed()),
+            });
+            locked_state.frame_id += 1;
 
-                // Estimate of time at which `most_recent_capture` will next be
-                // updated.
-                let now = Instant::now();
-                if update_interval == Duration::ZERO {
-                    locked_state.eta = Some(
-                        now + actual_exposure_duration.unwrap_or(
-                            locked_state.camera_settings.exposure_duration,
-                        ),
-                    );
-                } else {
-                    locked_state.eta = Some(now + update_interval);
-                }
+            // Estimate of time at which `most_recent_capture` will next be
+            // updated.
+            let now = Instant::now();
+            if update_interval == Duration::ZERO {
+                locked_state.eta = Some(
+                    now + actual_exposure_duration.unwrap_or(
+                        locked_state.camera_settings.exposure_duration,
+                    ),
+                );
+            } else {
+                locked_state.eta = Some(now + update_interval);
             }
         } // loop.
           // Fallback cleanup if loop exits unexpectedly.
@@ -951,6 +937,55 @@ impl RpiCamera {
         }
         while rx.try_recv().is_ok() {} // Drain channel.
     } // worker().
+
+    // Returns true when the frame metadata reflects the currently requested
+    // settings. Resets params_inaccurate_count to 0 on match. If count reaches
+    // PARAMS_ACCURATE_TIMEOUT without a match, logs a warning and returns true.
+    fn compute_params_accurate(
+        state: &mut SharedState,
+        actual_exposure: Option<Duration>,
+        actual_abstract_gain: Option<i32>,
+    ) -> bool {
+        const PARAMS_ACCURATE_TIMEOUT: i32 = 20;
+        if state.params_inaccurate_count == 0 {
+            return true;
+        }
+        let exp_matches = actual_exposure.map(|actual| {
+            let requested = state.camera_settings.exposure_duration;
+            // 5% tolerance: auto-exposure changes by at least 20% per step,
+            // so this window unambiguously identifies the requested setting.
+            let diff = if actual > requested { actual - requested } else { requested - actual };
+            diff.as_secs_f64() < requested.as_secs_f64() * 0.05
+        });
+        let gain_matches = actual_abstract_gain.map(|actual| {
+            // Allow ±10: gain is set manually to 0 or 100, never tweaked by
+            // auto-exposure, so a wide window safely absorbs hardware quantization.
+            (actual - state.camera_settings.gain.value()).abs() <= 10
+        });
+        // Require both metadata fields to be present and matching. If either
+        // or both is absent we cannot confirm accuracy and fall through to the
+        // timeout.
+        let confirmed = matches!((exp_matches, gain_matches), (Some(true), Some(true)));
+        if confirmed {
+            state.params_inaccurate_count = 0;
+            return true;
+        }
+        state.params_inaccurate_count += 1;
+        if state.params_inaccurate_count >= PARAMS_ACCURATE_TIMEOUT {
+            warn!("params_accurate timeout after {} frames: \
+                   requested exp={:.1}ms gain={}, \
+                   actual exp={:.1}ms gain={}",
+                PARAMS_ACCURATE_TIMEOUT,
+                state.camera_settings.exposure_duration.as_secs_f64() * 1000.0,
+                state.camera_settings.gain.value(),
+                actual_exposure.map_or(-1.0, |d| d.as_secs_f64() * 1000.0),
+                actual_abstract_gain.unwrap_or(-1),
+            );
+            state.params_inaccurate_count = 0;
+            return true;
+        }
+        false
+    }
 
     // Translate our 0..100 into the camera min/max range for analog gain.
     fn cam_gain(
