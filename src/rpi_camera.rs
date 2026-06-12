@@ -45,12 +45,12 @@ pub type ConvertFn = fn(
     stride: usize,
     buf_data: &[u8],
     image_data: &mut [u8],
+    binned_data: &mut [u8],
     width: usize,
     height: usize,
     is_10_bit: bool,
     is_12_bit: bool,
     is_packed: bool,
-    do_bin_2x2: bool,
 );
 static CONVERT_FN: OnceLock<ConvertFn> = OnceLock::new();
 pub fn set_converter(func: ConvertFn) {
@@ -64,7 +64,6 @@ pub struct RpiCamera {
     sensor_height: f32,
 
     is_color: bool,
-    binning: u32,
 
     // Our state, shared between RpiCamera methods and the capture thread.
     state: Arc<tokio::sync::Mutex<SharedState>>,
@@ -145,7 +144,7 @@ impl RpiCamera {
 
     // Returns a RpiCamera instance that implements the AbstractCamera API.
     // `camera_index` is w.r.t. the enumerate_cameras() vector length.
-    pub async fn new(camera_index: usize, prefer_binned: bool) -> Result<Self, CanonicalError> {
+    pub async fn new(camera_index: usize) -> Result<Self, CanonicalError> {
         let mgr = CameraManager::new().unwrap();
         let cameras = mgr.cameras();
         let cam = cameras.get(camera_index).unwrap();
@@ -243,12 +242,6 @@ impl RpiCamera {
             sensor_height: height as f32 * pixel_size_nanometers.height as f32
                 / 1000000.0,
             is_color,
-            binning: if prefer_binned {
-                info!("Using 2x2 software binning");
-                2
-            } else {
-                1
-            },
             state: Arc::new(tokio::sync::Mutex::new(SharedState {
                 camera_index,
                 model: model.to_string(),
@@ -513,78 +506,65 @@ impl RpiCamera {
     // * CedarDetect usually does 2x2 binning prior to running its star
     //   detection algorithm, so the R/G/B values are roughly converted to luma
     //   in the binning process.
-    // stride:     row stride of buf_data in bytes.
-    // buf_data:   raw sensor data in the camera's native pixel format;
-    //             height*stride bytes total, width pixels of data per row.
-    // image_data: output buffer; must be width*height bytes if !do_bin_2x2,
-    //             or (width/2)*(height/2) bytes if do_bin_2x2.
+    // stride:      row stride of buf_data in bytes.
+    // buf_data:    raw sensor data in the camera's native pixel format;
+    //              height*stride bytes total, width pixels of data per row.
+    // image_data:  output buffer; width*height bytes; receives full-res 8-bit pixels.
+    // binned_data: output buffer; (width/2)*(height/2) bytes; receives 2x2-binned pixels.
     // is_10_bit / is_12_bit / is_16_bit: exactly one true, or all false for 8-bit.
-    // is_packed:  true for CSI-2 packed formats (e.g. RAW10P, RAW12P).
-    // do_bin_2x2: if true, 2x2 average-bin while converting; output is half size.
+    // is_packed:   true for CSI-2 packed formats (e.g. RAW10P, RAW12P).
     fn convert_to_8bit(
         stride: usize,
         buf_data: &[u8],
         image_data: &mut [u8],
+        binned_data: &mut [u8],
         width: usize,
         height: usize,
         is_10_bit: bool,
         is_12_bit: bool,
         is_16_bit: bool,
         is_packed: bool,
-        do_bin_2x2: bool,
     ) {
-        // Use optimized function if we have one (handles binning too).
+        // Use optimized function if we have one.
         if !is_16_bit {
             if let Some(f) = CONVERT_FN.get() {
                 f(
-                    stride, buf_data, image_data, width, height, is_10_bit,
-                    is_12_bit, is_packed, do_bin_2x2,
+                    stride, buf_data, image_data, binned_data, width, height,
+                    is_10_bit, is_12_bit, is_packed,
                 );
                 return;
             }
         }
 
-        // Reference implementation: convert to 8-bit into a temporary full-size
-        // buffer, then bin if requested.
-        let mut tmp: Vec<u8>;
-        let full: &[u8] = if !is_10_bit && !is_12_bit && !is_16_bit {
-            // Already 8-bit; reference directly into buf_data if stride==width,
-            // otherwise copy row-by-row into tmp.
-            if stride == width && !do_bin_2x2 {
-                image_data[..width * height]
-                    .copy_from_slice(&buf_data[..width * height]);
-                return;
-            }
-            tmp = vec![0u8; width * height];
+        // Reference implementation: decode to full-res 8-bit directly into
+        // image_data, then 2x2 bin into binned_data.
+        if !is_10_bit && !is_12_bit && !is_16_bit {
+            // Already 8-bit; copy row-by-row to strip stride padding.
             for row in 0..height {
                 let src = row * stride;
                 let dst = row * width;
-                tmp[dst..dst + width].copy_from_slice(&buf_data[src..src + width]);
+                image_data[dst..dst + width].copy_from_slice(&buf_data[src..src + width]);
             }
-            &tmp
         } else if is_16_bit {
-            tmp = vec![0u8; width * height];
             for row in 0..height {
                 let buf_row_start = row * stride;
                 let pix_row_start = row * width;
                 for (src_chunk, dst) in buf_data[buf_row_start..buf_row_start + width * 2]
                     .chunks_exact(2)
-                    .zip(tmp[pix_row_start..pix_row_start + width].iter_mut())
+                    .zip(image_data[pix_row_start..pix_row_start + width].iter_mut())
                 {
                     *dst = src_chunk[1]; // keep high byte (little-endian)
                 }
             }
-            &tmp
         } else if is_10_bit {
             assert!(is_packed, "Unpacked 10-bit raw not yet supported");
-            tmp = vec![0u8; width * height];
             for row in 0..height {
                 let buf_row_start = row * stride;
                 let pix_row_start = row * width;
                 for (buf_chunk, pix_chunk) in
                     buf_data[buf_row_start..buf_row_start + width * 5 / 4]
                         .chunks_exact(5)
-                        .zip(tmp[pix_row_start..pix_row_start + width].chunks_exact_mut(4))
+                        .zip(image_data[pix_row_start..pix_row_start + width].chunks_exact_mut(4))
                 {
                     pix_chunk[0] = buf_chunk[0];
                     pix_chunk[1] = buf_chunk[1];
@@ -592,41 +572,34 @@ impl RpiCamera {
                     pix_chunk[3] = buf_chunk[3];
                 }
             }
-            &tmp
         } else {
             assert!(is_12_bit, "Expected 12-bit format");
             assert!(is_packed, "Unpacked 12-bit raw not yet supported");
-            tmp = vec![0u8; width * height];
             for row in 0..height {
                 let buf_row_start = row * stride;
                 let pix_row_start = row * width;
                 for (buf_chunk, pix_pair) in
                     buf_data[buf_row_start..buf_row_start + width * 3 / 2]
                         .chunks_exact(3)
-                        .zip(tmp[pix_row_start..pix_row_start + width].chunks_exact_mut(2))
+                        .zip(image_data[pix_row_start..pix_row_start + width].chunks_exact_mut(2))
                 {
                     pix_pair[0] = buf_chunk[0];
                     pix_pair[1] = buf_chunk[1];
                 }
             }
-            &tmp
-        };
+        }
 
-        if do_bin_2x2 {
-            // 2x2 average bin: output is (width/2) x (height/2).
-            let out_w = width / 2;
-            let out_h = height / 2;
-            for oy in 0..out_h {
-                for ox in 0..out_w {
-                    let tl = full[(oy * 2) * width + ox * 2] as u16;
-                    let tr = full[(oy * 2) * width + ox * 2 + 1] as u16;
-                    let bl = full[(oy * 2 + 1) * width + ox * 2] as u16;
-                    let br = full[(oy * 2 + 1) * width + ox * 2 + 1] as u16;
-                    image_data[oy * out_w + ox] = ((tl + tr + bl + br) / 4) as u8;
-                }
+        // 2x2 average bin into binned_data.
+        let out_w = width / 2;
+        let out_h = height / 2;
+        for oy in 0..out_h {
+            for ox in 0..out_w {
+                let tl = image_data[(oy * 2) * width + ox * 2] as u16;
+                let tr = image_data[(oy * 2) * width + ox * 2 + 1] as u16;
+                let bl = image_data[(oy * 2 + 1) * width + ox * 2] as u16;
+                let br = image_data[(oy * 2 + 1) * width + ox * 2 + 1] as u16;
+                binned_data[oy * out_w + ox] = ((tl + tr + bl + br) / 4) as u8;
             }
-        } else {
-            image_data[..width * height].copy_from_slice(full);
         }
     }
 
@@ -634,7 +607,7 @@ impl RpiCamera {
     // executes this function.
     async fn worker(state: Arc<tokio::sync::Mutex<SharedState>>,
                     stop_request: Arc<AtomicBool>,
-                    binning: u32, is_color: bool) {
+                    is_color: bool) {
         info!("Starting RpiCamera worker");
 
         // Whenever we change the camera settings, we will have discarded the
@@ -843,49 +816,41 @@ impl RpiCamera {
                 }
             }
 
-            // Allocate uninitialized storage to receive the converted image
-            // data.
-            let do_bin_2x2 = binning == 2;
-            let (out_w, out_h) = if do_bin_2x2 {
-                (width / 2, height / 2)
-            } else {
-                (width, height)
-            };
-            let mut image_data = vec![0u8; out_w * out_h];
-
+            // Decode raw sensor data into full-res and 2x2-binned 8-bit images.
+            let image: GrayImage;
+            let binned_image: GrayImage;
             if pisp_compressed {
-                let mut full = vec![0u8; width * height];
+                let mut image_data = vec![0u8; width * height];
                 pisp_compression::uncompress(
                     stride,
                     buf_data,
-                    &mut full,
+                    &mut image_data,
                     width,
                     height,
                     pisp_compression_mode,
                 );
-                if do_bin_2x2 {
-                    let full_img =
-                        GrayImage::from_raw(width as u32, height as u32, full).unwrap();
-                    image_data = bin_2x2(&full_img).into_raw();
-                } else {
-                    image_data = full;
-                }
+                image = GrayImage::from_raw(width as u32, height as u32, image_data).unwrap();
+                binned_image = bin_2x2(&image);
             } else {
+                let mut image_data = vec![0u8; width * height];
+                let mut binned_data = vec![0u8; (width / 2) * (height / 2)];
                 Self::convert_to_8bit(
                     stride,
                     buf_data,
                     &mut image_data,
+                    &mut binned_data,
                     width,
                     height,
                     is_10_bit,
                     is_12_bit,
                     is_16_bit,
                     is_packed,
-                    do_bin_2x2,
                 );
+                image = GrayImage::from_raw(width as u32, height as u32, image_data).unwrap();
+                binned_image = GrayImage::from_raw(
+                    (width / 2) as u32, (height / 2) as u32, binned_data).unwrap();
             }
             drop(_sync_guard);
-            let image = GrayImage::from_raw(out_w as u32, out_h as u32, image_data).unwrap();
 
             req.reuse(ReuseFlag::REUSE_BUFFERS);
             let controls = req.controls_mut();
@@ -909,7 +874,7 @@ impl RpiCamera {
                     actual_abstract_gain,
                 ),
                 image: Arc::new(image),
-                binning,
+                binned_image: Arc::new(binned_image),
                 is_color,
                 readout_time,
                 readout_instant,
@@ -1020,7 +985,6 @@ impl RpiCamera {
         if self.capture_thread.is_none() {
             let cloned_state = self.state.clone();
             let cloned_stop_request = self.stop_request.clone();
-            let copied_binning = self.binning;
             let copied_is_color = self.is_color;
             // Allocate a thread for concurrent execution of image acquisition
             // and uncompressing with other activities.
@@ -1032,7 +996,7 @@ impl RpiCamera {
                     .build()
                     .unwrap();
                 runtime.block_on(async move {
-                    Self::worker(cloned_state, cloned_stop_request, copied_binning,
+                    Self::worker(cloned_state, cloned_stop_request,
                                  copied_is_color).await;
                 });
             }));
@@ -1101,15 +1065,6 @@ impl AbstractCamera for RpiCamera {
 
     async fn optimal_gain(&self) -> Gain {
         Gain::new(100)
-    }
-
-    fn binning(&self) -> u32 {
-        self.binning
-    }
-
-    async fn set_hardware_binning(&mut self, _hw_binning: bool)
-                                  -> Result<(), CanonicalError> {
-        Ok(())  // TODO: implement hardware binning
     }
 
     async fn set_exposure_duration(

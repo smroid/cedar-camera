@@ -90,19 +90,16 @@ pub struct CapturedImage {
     pub params_accurate: bool,
 
     /// 8 bit pixel data stored in row major order. For color cameras with
-    /// binning==1, the raw values of the photosites are returned (linearly
-    /// scaled to 8 bits); no demosaicing is done. The caller is responsible for
-    /// dealing with the Bayer patterning of the color sensor; a simple approach
-    /// used by Cedar Detect is to apply a simple 2x2 binning which yields a
-    /// workable 8-bit monochrome value suitable for detecting and centroiding
-    /// stars.
-    /// For color cameras with binning==2, capture_image() applies 2x2 binning
-    /// resulting in `image` being reduced resolution 8-bit monochrome.
+    /// the raw values of the photosites are returned (linearly scaled to 8
+    /// bits); no demosaicing is done. The caller is responsible for dealing
+    /// with the Bayer patterning of the color sensor; a simple approach is to
+    /// use 'binned_image' which is a workable 8-bit monochrome value suitable
+    /// for detecting and centroiding stars.
     pub image: Arc<GrayImage>,
 
-    /// The binning factor applied to produce `image`. Matches the value of
-    /// AbstractCamera::binning() on the camera that captured this image.
-    pub binning: u32,
+    /// 2x2 binned copy of 'image'. If 'image' is color, the 2x2 binned image is
+    /// a simplistic but usable monochrome conversion.
+    pub binned_image: Arc<GrayImage>,
 
     /// Whether `image` is from a color (Bayer pattern) sensor. Matches the
     /// value of AbstractCamera::is_color() on the camera that captured this image.
@@ -153,11 +150,6 @@ pub trait AbstractCamera {
     /// for an explanation of this idea.
     async fn optimal_gain(&self) -> Gain;
 
-    // Tells if CapturedImage.image is the full dimensions() of this camera
-    // (binning==1) or whether 2x2 binning has been applied (binning==2), in
-    // which case the CapturedImage.image is half size in both dimensions.
-    fn binning(&self) -> u32;
-
     // Changeable parameters that influence subsequent image captures.
 
     /// Returns InvalidArgument if specified exposure duration cannot be
@@ -180,15 +172,6 @@ pub trait AbstractCamera {
     // as they become available in the camera.
     async fn set_update_interval(&mut self, update_interval: Duration)
                                  -> Result<(), CanonicalError>;
-
-    // If binning()==2, determines whether the 2x2 binning is done on-chip or
-    // in ISP pipeline (when true) or the 2x2 binning is done in software post-
-    // processing (when false).
-    // If binning()==1 this parameter is ignored.
-    // Hardware/ISP binning is faster but for color sensors might result in some
-    // S/N loss (TBD).
-    async fn set_hardware_binning(&mut self, hw_binning: bool)
-                                  -> Result<(), CanonicalError>;
 
     // Action methods.
 

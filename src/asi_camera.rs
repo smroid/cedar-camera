@@ -11,6 +11,8 @@ use async_trait::async_trait;
 use image::GrayImage;
 use log::{debug, info, warn};
 
+use cedar_detect::image_funcs::bin_2x2;
+
 use asi_camera2::asi_camera2_sdk;
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
                              EnumeratedCameraInfo, Gain, Offset};
@@ -293,11 +295,12 @@ impl ASICamera {
             }
             let image = GrayImage::from_raw(width as u32, height as u32,
                                             image_data).unwrap();
+            let binned_image = bin_2x2(&image);
             locked_state.most_recent_capture = Some(CapturedImage {
                 capture_params: locked_state.camera_settings,
                 params_accurate: mark_image_count == 0,
                 image: Arc::new(image),
-                binning: 1,
+                binned_image: Arc::new(binned_image),
                 is_color: false,
                 readout_time: SystemTime::now(),
                 readout_instant: Instant::now(),
@@ -408,11 +411,6 @@ impl AbstractCamera for ASICamera {
             (self.max_gain - self.min_gain) as f64;
         Gain::new((100.0 * frac) as i32)
     }
-
-    fn binning(&self) -> u32 { 1 }
-
-    async fn set_hardware_binning(&mut self, _hw_binning: bool)
-                                  -> Result<(), CanonicalError> { Ok(()) }
 
     async fn set_exposure_duration(&mut self, exp_duration: Duration)
                              -> Result<(), CanonicalError> {
