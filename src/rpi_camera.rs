@@ -228,7 +228,7 @@ impl RpiCamera {
         debug!("min_gain {}", min_gain);
         let max_gain = match model.as_str() {
             "imx477" => 22,
-            "imx219" => 16,
+            "imx219" => 11,  // Hardware max is 10.667x (gain code 232/256).
             "imx290" => 31, // AKA imx462.
             "imx296" => 15,
             "ov5647" => 63,
@@ -485,11 +485,22 @@ impl RpiCamera {
             )))
             .unwrap();
         controls.set(NoiseReductionMode::Off).unwrap();
-        if state.model == "imx290" {
-            // Force 60fps mode
-            controls
-                .set(FrameDurationLimits([16_667, 1_000_000]))
-                .unwrap();
+        let frame_duration_limits = match state.model.as_str() {
+            // Force 60fps mode.
+            "imx290" => Some([16_667i64, 1_000_000i64]),
+            // IMX219: exposure is limited to ~1.24s by VBLANK max (65535 lines
+            // at the default PPL of 3448). The driver marks HBLANK read-only so
+            // the IPA cannot extend the line length. We pass 1.24s so the IPA
+            // drives VBLANK to its maximum.
+            "imx219" => Some([16_667i64, 1_240_000i64]),
+            // Allow long exposures up to 4s. The ov5647 VBLANK alone caps at
+            // ~0.7-1.1s depending on mode; libcamera extends HBLANK to reach
+            // longer durations, up to a hardware maximum of ~4-5s.
+            "ov5647" => Some([16_667i64, 4_000_000i64]),
+            _ => None,
+        };
+        if let Some(limits) = frame_duration_limits {
+            controls.set(FrameDurationLimits(limits)).unwrap();
         }
     }
 
