@@ -58,7 +58,7 @@ impl DmaHeap {
         for path in &["/dev/dma_heap/vidbuf_cached", "/dev/dma_heap/linux,cma"] {
             match OpenOptions::new().read(true).write(true).open(path) {
                 Ok(file) => {
-                    log::info!("Opened dma-heap at {}", path);
+                    log::debug!("Opened dma-heap at {}", path);
                     return Ok(Self { file });
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
