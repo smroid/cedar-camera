@@ -22,13 +22,8 @@ pub enum CameraInterface {
 //   indicates which interface's camera is to be returned.
 // * `camera_index` controls which camera (on the selected interface) is
 //   returned.
-// * `prefer_binned` controls whether the caller wants the camera to apply 2x2
-//   binning in capture_image(). Only RpiCamera honors this; all other camera
-//   types ignore it and always return binning()==1. Consult the returned
-//   camera's binning() function to confirm what binning is actually in effect.
 pub async fn select_camera(
-    mut camera_interface: Option<&CameraInterface>, camera_index: usize,
-    prefer_binned: bool)
+    mut camera_interface: Option<&CameraInterface>, camera_index: usize)
     -> Result<Box<dyn AbstractCamera + Send>, CanonicalError>
 {
     // Enumerate cameras on supported interfaces.
@@ -64,7 +59,7 @@ pub async fn select_camera(
             Ok(Box::new(ASICamera::new(camera_index).await?))
         },
         Some(CameraInterface::Rpi) => {
-            Ok(Box::new(RpiCamera::new(camera_index, prefer_binned).await?))
+            Ok(Box::new(RpiCamera::new(camera_index).await?))
         },
     }
 }

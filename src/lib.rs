@@ -3,6 +3,7 @@
 
 pub mod abstract_camera;
 pub mod asi_camera;
+pub mod dma_heap;
 pub mod image_camera;
 pub mod pisp_compression;
 pub mod rpi_camera;

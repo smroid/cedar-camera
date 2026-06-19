@@ -89,12 +89,12 @@ pub type ConvertFn = fn(
     stride: usize,
     buf_data: &[u8],
     image_data: &mut [u8],
+    binned_data: &mut [u8],
     width: usize,
     height: usize,
     is_10_bit: bool,
     is_12_bit: bool,
     is_packed: bool,
-    do_bin_2x2: bool,
 );
 static CONVERT_FN: OnceLock<ConvertFn> = OnceLock::new();
 pub fn set_converter(func: ConvertFn) {
@@ -108,7 +108,6 @@ pub struct RpiCamera {
     sensor_height: f32,
 
     is_color: bool,
-    binning: u32,
 
     // Our state, shared between RpiCamera methods and the capture thread.
     state: Arc<tokio::sync::Mutex<SharedState>>,
@@ -149,7 +148,12 @@ struct SharedState {
     // effect when the current exposure finishes, influencing the following
     // exposures.
     camera_settings: CaptureParams,
-    setting_changed: bool,
+    // Non-zero while metadata has not yet confirmed new settings are in effect.
+    // Set to 1 by changed_setting() under the same lock that clears
+    // most_recent_capture, closing the race window where the worker could store
+    // a params_accurate=true frame between the setting change and the next
+    // frame arriving. Reset to 0 by compute_params_accurate() on match.
+    params_inaccurate_count: i32,
 
     // Zero means go fast as camera frames are available.
     update_interval: Duration,
@@ -187,7 +191,7 @@ impl RpiCamera {
 
     // Returns a RpiCamera instance that implements the AbstractCamera API.
     // `camera_index` is w.r.t. the enumerate_cameras() vector length.
-    pub async fn new(camera_index: usize, prefer_binned: bool) -> Result<Self, CanonicalError> {
+    pub async fn new(camera_index: usize) -> Result<Self, CanonicalError> {
         let mgr = CameraManager::new().unwrap();
         let cameras = mgr.cameras();
         let cam = cameras.get(camera_index).unwrap();
@@ -271,7 +275,7 @@ impl RpiCamera {
         debug!("min_gain {}", min_gain);
         let max_gain = match model.as_str() {
             "imx477" => 22,
-            "imx219" => 16,
+            "imx219" => 11,  // Hardware max is 10.667x (gain code 232/256).
             "imx290" => 31, // AKA imx462.
             "imx296" => 15,
             "ov5647" => 63,
@@ -285,12 +289,6 @@ impl RpiCamera {
             sensor_height: height as f32 * pixel_size_nanometers.height as f32
                 / 1000000.0,
             is_color,
-            binning: if prefer_binned {
-                info!("Using 2x2 software binning");
-                2
-            } else {
-                1
-            },
             state: Arc::new(tokio::sync::Mutex::new(SharedState {
                 camera_index,
                 model: model.to_string(),
@@ -306,7 +304,7 @@ impl RpiCamera {
                 is_16_bit,
                 is_packed,
                 camera_settings: CaptureParams::new(),
-                setting_changed: false,
+                params_inaccurate_count: 0,
                 update_interval: Duration::ZERO,
                 eta: None,
                 most_recent_capture: None,
@@ -513,7 +511,7 @@ impl RpiCamera {
     // capture_image() will wait for the setting change to be reflected in
     // the captured image stream.
     fn changed_setting(locked_state: &mut SharedState) {
-        locked_state.setting_changed = true;
+        locked_state.params_inaccurate_count = 1;
         locked_state.most_recent_capture = None;
     }
 
@@ -535,11 +533,22 @@ impl RpiCamera {
             )))
             .unwrap();
         controls.set(NoiseReductionMode::Off).unwrap();
-        if state.model == "imx290" {
-            // Force 60fps mode
-            controls
-                .set(FrameDurationLimits([16_667, 1_000_000]))
-                .unwrap();
+        let frame_duration_limits = match state.model.as_str() {
+            // Force 60fps mode.
+            "imx290" => Some([16_667i64, 1_000_000i64]),
+            // IMX219: exposure is limited to ~1.24s by VBLANK max (65535 lines
+            // at the default PPL of 3448). The driver marks HBLANK read-only so
+            // the IPA cannot extend the line length. We pass 1.24s so the IPA
+            // drives VBLANK to its maximum.
+            "imx219" => Some([16_667i64, 1_240_000i64]),
+            // Allow long exposures up to 4s. The ov5647 VBLANK alone caps at
+            // ~0.7-1.1s depending on mode; libcamera extends HBLANK to reach
+            // longer durations, up to a hardware maximum of ~4-5s.
+            "ov5647" => Some([16_667i64, 4_000_000i64]),
+            _ => None,
+        };
+        if let Some(limits) = frame_duration_limits {
+            controls.set(FrameDurationLimits(limits)).unwrap();
         }
     }
 
@@ -556,78 +565,65 @@ impl RpiCamera {
     // * CedarDetect usually does 2x2 binning prior to running its star
     //   detection algorithm, so the R/G/B values are roughly converted to luma
     //   in the binning process.
-    // stride:     row stride of buf_data in bytes.
-    // buf_data:   raw sensor data in the camera's native pixel format;
-    //             height*stride bytes total, width pixels of data per row.
-    // image_data: output buffer; must be width*height bytes if !do_bin_2x2,
-    //             or (width/2)*(height/2) bytes if do_bin_2x2.
+    // stride:      row stride of buf_data in bytes.
+    // buf_data:    raw sensor data in the camera's native pixel format;
+    //              height*stride bytes total, width pixels of data per row.
+    // image_data:  output buffer; width*height bytes; receives full-res 8-bit pixels.
+    // binned_data: output buffer; (width/2)*(height/2) bytes; receives 2x2-binned pixels.
     // is_10_bit / is_12_bit / is_16_bit: exactly one true, or all false for 8-bit.
-    // is_packed:  true for CSI-2 packed formats (e.g. RAW10P, RAW12P).
-    // do_bin_2x2: if true, 2x2 average-bin while converting; output is half size.
+    // is_packed:   true for CSI-2 packed formats (e.g. RAW10P, RAW12P).
     fn convert_to_8bit(
         stride: usize,
         buf_data: &[u8],
         image_data: &mut [u8],
+        binned_data: &mut [u8],
         width: usize,
         height: usize,
         is_10_bit: bool,
         is_12_bit: bool,
         is_16_bit: bool,
         is_packed: bool,
-        do_bin_2x2: bool,
     ) {
-        // Use optimized function if we have one (handles binning too).
+        // Use optimized function if we have one.
         if !is_16_bit {
             if let Some(f) = CONVERT_FN.get() {
                 f(
-                    stride, buf_data, image_data, width, height, is_10_bit,
-                    is_12_bit, is_packed, do_bin_2x2,
+                    stride, buf_data, image_data, binned_data, width, height,
+                    is_10_bit, is_12_bit, is_packed,
                 );
                 return;
             }
         }
 
-        // Reference implementation: convert to 8-bit into a temporary full-size
-        // buffer, then bin if requested.
-        let mut tmp: Vec<u8>;
-        let full: &[u8] = if !is_10_bit && !is_12_bit && !is_16_bit {
-            // Already 8-bit; reference directly into buf_data if stride==width,
-            // otherwise copy row-by-row into tmp.
-            if stride == width && !do_bin_2x2 {
-                image_data[..width * height]
-                    .copy_from_slice(&buf_data[..width * height]);
-                return;
-            }
-            tmp = vec![0u8; width * height];
+        // Reference implementation: decode to full-res 8-bit directly into
+        // image_data, then 2x2 bin into binned_data.
+        if !is_10_bit && !is_12_bit && !is_16_bit {
+            // Already 8-bit; copy row-by-row to strip stride padding.
             for row in 0..height {
                 let src = row * stride;
                 let dst = row * width;
-                tmp[dst..dst + width].copy_from_slice(&buf_data[src..src + width]);
+                image_data[dst..dst + width].copy_from_slice(&buf_data[src..src + width]);
             }
-            &tmp
         } else if is_16_bit {
-            tmp = vec![0u8; width * height];
             for row in 0..height {
                 let buf_row_start = row * stride;
                 let pix_row_start = row * width;
                 for (src_chunk, dst) in buf_data[buf_row_start..buf_row_start + width * 2]
                     .chunks_exact(2)
-                    .zip(tmp[pix_row_start..pix_row_start + width].iter_mut())
+                    .zip(image_data[pix_row_start..pix_row_start + width].iter_mut())
                 {
                     *dst = src_chunk[1]; // keep high byte (little-endian)
                 }
             }
-            &tmp
         } else if is_10_bit {
             assert!(is_packed, "Unpacked 10-bit raw not yet supported");
-            tmp = vec![0u8; width * height];
             for row in 0..height {
                 let buf_row_start = row * stride;
                 let pix_row_start = row * width;
                 for (buf_chunk, pix_chunk) in
                     buf_data[buf_row_start..buf_row_start + width * 5 / 4]
                         .chunks_exact(5)
-                        .zip(tmp[pix_row_start..pix_row_start + width].chunks_exact_mut(4))
+                        .zip(image_data[pix_row_start..pix_row_start + width].chunks_exact_mut(4))
                 {
                     pix_chunk[0] = buf_chunk[0];
                     pix_chunk[1] = buf_chunk[1];
@@ -635,41 +631,34 @@ impl RpiCamera {
                     pix_chunk[3] = buf_chunk[3];
                 }
             }
-            &tmp
         } else {
             assert!(is_12_bit, "Expected 12-bit format");
             assert!(is_packed, "Unpacked 12-bit raw not yet supported");
-            tmp = vec![0u8; width * height];
             for row in 0..height {
                 let buf_row_start = row * stride;
                 let pix_row_start = row * width;
                 for (buf_chunk, pix_pair) in
                     buf_data[buf_row_start..buf_row_start + width * 3 / 2]
                         .chunks_exact(3)
-                        .zip(tmp[pix_row_start..pix_row_start + width].chunks_exact_mut(2))
+                        .zip(image_data[pix_row_start..pix_row_start + width].chunks_exact_mut(2))
                 {
                     pix_pair[0] = buf_chunk[0];
                     pix_pair[1] = buf_chunk[1];
                 }
             }
-            &tmp
-        };
+        }
 
-        if do_bin_2x2 {
-            // 2x2 average bin: output is (width/2) x (height/2).
-            let out_w = width / 2;
-            let out_h = height / 2;
-            for oy in 0..out_h {
-                for ox in 0..out_w {
-                    let tl = full[(oy * 2) * width + ox * 2] as u16;
-                    let tr = full[(oy * 2) * width + ox * 2 + 1] as u16;
-                    let bl = full[(oy * 2 + 1) * width + ox * 2] as u16;
-                    let br = full[(oy * 2 + 1) * width + ox * 2 + 1] as u16;
-                    image_data[oy * out_w + ox] = ((tl + tr + bl + br) / 4) as u8;
-                }
+        // 2x2 average bin into binned_data.
+        let out_w = width / 2;
+        let out_h = height / 2;
+        for oy in 0..out_h {
+            for ox in 0..out_w {
+                let tl = image_data[(oy * 2) * width + ox * 2] as u16;
+                let tr = image_data[(oy * 2) * width + ox * 2 + 1] as u16;
+                let bl = image_data[(oy * 2 + 1) * width + ox * 2] as u16;
+                let br = image_data[(oy * 2 + 1) * width + ox * 2 + 1] as u16;
+                binned_data[oy * out_w + ox] = ((tl + tr + bl + br) / 4) as u8;
             }
-        } else {
-            image_data[..width * height].copy_from_slice(full);
         }
     }
 
@@ -677,27 +666,13 @@ impl RpiCamera {
     // executes this function.
     async fn worker(state: Arc<tokio::sync::Mutex<SharedState>>,
                     stop_request: Arc<AtomicBool>,
-                    binning: u32, is_color: bool) {
+                    is_color: bool) {
         info!("Starting RpiCamera worker");
 
         // Whenever we change the camera settings, we will have discarded the
         // in-progress exposure, because the old settings were in effect when it
         // started. We need to mark dirty a number of images after a setting
         // change.
-        let pipeline_depth = match state.lock().await.model.as_str() {
-            // These values are determined empirically by using the
-            // exposure_sweep test program.
-            "imx477" => 6,
-            "imx219" => 4,
-            "imx290" => 5,
-            "imx296" => 4,
-            "ov5647" => 4,
-            "ov9281" => 3,
-            _ => 5,
-        };
-
-        // How many captured images we will mark with params_accurate=false.
-        let mut mark_image_count = 0;
         let mgr = CameraManager::new().unwrap();
 
         // Setting AeEnable(false) in setup_camera_request causes the libcamera
@@ -713,11 +688,12 @@ impl RpiCamera {
         let mut cfgs = Self::get_camera_configs(&cam)
             .expect("Failed to get camera configs in worker");
 
-        // Set the buffer count to pipeline_depth + 1 to allow re-queueing
-        // before processing completes.
+        // 3 buffers: one being processed by the CPU, one in-flight to the
+        // camera, one spare for immediate re-queue.
+        let num_buffers = 3;
         {
             let mut cfg = cfgs.get_mut(0).unwrap();
-            cfg.set_buffer_count(pipeline_depth + 1);
+            cfg.set_buffer_count(num_buffers as u32);
         }
 
         active_cam
@@ -725,6 +701,7 @@ impl RpiCamera {
             .expect("Failed to configure camera");
         let cfg = cfgs.get(0).unwrap();
         let stride = cfg.get_stride() as usize;
+        let frame_size = cfg.get_frame_size() as usize;
 
         // Log the selected format.
         info!("Using camera format: {:?}", cfg.get_pixel_format());
@@ -744,7 +721,7 @@ impl RpiCamera {
         {
             let mut locked_state = state.lock().await;
             // Create capture requests and attach cacheable CMA buffers.
-            reqs = (0..pipeline_depth + 1)
+            reqs = (0..num_buffers)
                 .map(|i| {
                     let dma_fd = allocate_cma_buffer(aligned_size).expect("Failed to allocate CMA buffer");
                     let app_fd = dma_fd.try_clone().unwrap();
@@ -856,7 +833,7 @@ impl RpiCamera {
             let actual_abstract_gain;
             let mmap_info;
             {
-                let mut locked_state = state.lock().await;
+                let locked_state = state.lock().await;
                 actual_exposure_duration = metadata
                     .get::<ExposureTime>()
                     .map(|ExposureTime(exp_us)| {
@@ -881,12 +858,6 @@ impl RpiCamera {
                 is_12_bit = locked_state.is_12_bit;
                 is_16_bit = locked_state.is_16_bit;
                 is_packed = locked_state.is_packed;
-                if locked_state.setting_changed {
-                    mark_image_count = pipeline_depth;
-                    locked_state.setting_changed = false;
-                } else if mark_image_count > 0 {
-                    mark_image_count -= 1;
-                }
                 let cookie = req.cookie() as usize;
                 let (ref fd, ptr_addr, len) = locked_state.mmap_ptrs[cookie];
                 use std::os::fd::AsRawFd;
@@ -899,68 +870,58 @@ impl RpiCamera {
             let buf_data = unsafe { core::slice::from_raw_parts(mmap_ptr, mmap_len) };
 
             // Early re-queueing: immediately queue the spare request before
-            // expensive processing.
+            // expensive processing. Detect setting changes here, at the point
+            // where new controls are actually sent to the camera.
             if let Some(mut spare) = spare_request.take() {
                 let controls = spare.controls_mut();
-                let locked_state = state.lock().await;
-                Self::setup_camera_request(controls, &locked_state);
-                drop(locked_state);
+                Self::setup_camera_request(controls, &*state.lock().await);
                 if let Err(e) = active_cam.queue_request(spare) {
                     warn!("Failed to queue spare request: {:?}", e);
                 }
             }
 
-            // Allocate uninitialized storage to receive the converted image
-            // data.
-            let do_bin_2x2 = binning == 2;
-            let (out_w, out_h) = if do_bin_2x2 {
-                (width / 2, height / 2)
-            } else {
-                (width, height)
-            };
-            let mut image_data = vec![0u8; out_w * out_h];
-
             // INVALIDATE THE CACHE (CPU will fetch fresh memory from the ISP)
             let sync_start = DmaBufSync { flags: DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ };
             unsafe { do_dma_buf_sync(plane_fd, &sync_start).unwrap() };
 
+            // Decode raw sensor data into full-res and 2x2-binned 8-bit images.
+            let image: GrayImage;
+            let binned_image: GrayImage;
             if pisp_compressed {
-                let mut full = vec![0u8; width * height];
+                let mut image_data = vec![0u8; width * height];
                 pisp_compression::uncompress(
                     stride,
                     buf_data,
-                    &mut full,
+                    &mut image_data,
                     width,
                     height,
                     pisp_compression_mode,
                 );
-                if do_bin_2x2 {
-                    let full_img =
-                        GrayImage::from_raw(width as u32, height as u32, full).unwrap();
-                    image_data = bin_2x2(&full_img).into_raw();
-                } else {
-                    image_data = full;
-                }
+                image = GrayImage::from_raw(width as u32, height as u32, image_data).unwrap();
+                binned_image = bin_2x2(&image);
             } else {
+                let mut image_data = vec![0u8; width * height];
+                let mut binned_data = vec![0u8; (width / 2) * (height / 2)];
                 Self::convert_to_8bit(
                     stride,
                     buf_data,
                     &mut image_data,
+                    &mut binned_data,
                     width,
                     height,
                     is_10_bit,
                     is_12_bit,
                     is_16_bit,
                     is_packed,
-                    do_bin_2x2,
                 );
+                image = GrayImage::from_raw(width as u32, height as u32, image_data).unwrap();
+                binned_image = GrayImage::from_raw(
+                    (width / 2) as u32, (height / 2) as u32, binned_data).unwrap();
             }
 
             // CLOSE SYNC WINDOW
             let sync_end = DmaBufSync { flags: DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ };
             unsafe { do_dma_buf_sync(plane_fd, &sync_end).unwrap() };
-
-            let image = GrayImage::from_raw(out_w as u32, out_h as u32, image_data).unwrap();
 
             req.reuse(ReuseFlag::REUSE_BUFFERS);
             let controls = req.controls_mut();
@@ -968,39 +929,41 @@ impl RpiCamera {
             Self::setup_camera_request(controls, &locked_state);
             spare_request = Some(req);
 
-            if !locked_state.setting_changed {
-                locked_state.most_recent_capture = Some(CapturedImage {
-                    capture_params: CaptureParams {
-                        exposure_duration: actual_exposure_duration.unwrap_or(
-                            locked_state.camera_settings.exposure_duration,
-                        ),
-                        gain: Gain::new(actual_abstract_gain.unwrap_or(
-                            locked_state.camera_settings.gain.value(),
-                        )),
-                        offset: locked_state.camera_settings.offset,
-                    },
-                    params_accurate: mark_image_count == 0,
-                    image: Arc::new(image),
-                    binning,
-                    is_color,
-                    readout_time,
-                    readout_instant,
-                    processing_duration: Some(last_frame_time.unwrap().elapsed()),
-                });
-                locked_state.frame_id += 1;
+            locked_state.most_recent_capture = Some(CapturedImage {
+                capture_params: CaptureParams {
+                    exposure_duration: actual_exposure_duration.unwrap_or(
+                        locked_state.camera_settings.exposure_duration,
+                    ),
+                    gain: Gain::new(actual_abstract_gain.unwrap_or(
+                        locked_state.camera_settings.gain.value(),
+                    )),
+                    offset: locked_state.camera_settings.offset,
+                },
+                params_accurate: Self::compute_params_accurate(
+                    &mut locked_state,
+                    actual_exposure_duration,
+                    actual_abstract_gain,
+                ),
+                image: Arc::new(image),
+                binned_image: Arc::new(binned_image),
+                is_color,
+                readout_time,
+                readout_instant,
+                processing_duration: Some(last_frame_time.unwrap().elapsed()),
+            });
+            locked_state.frame_id += 1;
 
-                // Estimate of time at which `most_recent_capture` will next be
-                // updated.
-                let now = Instant::now();
-                if update_interval == Duration::ZERO {
-                    locked_state.eta = Some(
-                        now + actual_exposure_duration.unwrap_or(
-                            locked_state.camera_settings.exposure_duration,
-                        ),
-                    );
-                } else {
-                    locked_state.eta = Some(now + update_interval);
-                }
+            // Estimate of time at which `most_recent_capture` will next be
+            // updated.
+            let now = Instant::now();
+            if update_interval == Duration::ZERO {
+                locked_state.eta = Some(
+                    now + actual_exposure_duration.unwrap_or(
+                        locked_state.camera_settings.exposure_duration,
+                    ),
+                );
+            } else {
+                locked_state.eta = Some(now + update_interval);
             }
         } // loop.
           // Fallback cleanup if loop exits unexpectedly.
@@ -1010,6 +973,58 @@ impl RpiCamera {
         }
         while rx.try_recv().is_ok() {} // Drain channel.
     } // worker().
+
+    // Returns true when the frame metadata reflects the currently requested
+    // settings. Resets params_inaccurate_count to 0 on match. If count reaches
+    // PARAMS_ACCURATE_TIMEOUT without a match, logs a warning and returns true.
+    fn compute_params_accurate(
+        state: &mut SharedState,
+        actual_exposure: Option<Duration>,
+        actual_abstract_gain: Option<i32>,
+    ) -> bool {
+        const PARAMS_ACCURATE_TIMEOUT: i32 = 20;
+        if state.params_inaccurate_count == 0 {
+            return true;
+        }
+        let exp_matches = actual_exposure.map(|actual| {
+            let requested = state.camera_settings.exposure_duration;
+            // 10% tolerance: auto-exposure changes by at least 20% per step,
+            // so this window unambiguously identifies the requested setting.
+            let diff = if actual > requested { actual - requested } else { requested - actual };
+            diff.as_secs_f64() < requested.as_secs_f64() * 0.10
+        });
+        let gain_matches = actual_abstract_gain.map(|actual| {
+            // Allow ±10: gain is set manually to 0 or 100, never tweaked by
+            // auto-exposure, so a wide window safely absorbs hardware quantization.
+            (actual - state.camera_settings.gain.value()).abs() <= 10
+        });
+        // Require both metadata fields to be present and matching. If either
+        // or both is absent we cannot confirm accuracy and fall through to the
+        // timeout.
+        let confirmed = matches!((exp_matches, gain_matches), (Some(true), Some(true)));
+        if confirmed {
+            state.params_inaccurate_count = 0;
+            return true;
+        }
+        state.params_inaccurate_count += 1;
+        if state.params_inaccurate_count >= PARAMS_ACCURATE_TIMEOUT {
+            warn!("params_accurate timeout after {} frames: \
+                   requested exp={:.4}ms gain={}, \
+                   actual exp={:.4}ms gain={} \
+                   (exp_matches={:?}, gain_matches={:?})",
+                PARAMS_ACCURATE_TIMEOUT,
+                state.camera_settings.exposure_duration.as_secs_f64() * 1000.0,
+                state.camera_settings.gain.value(),
+                actual_exposure.map_or(-1.0, |d| d.as_secs_f64() * 1000.0),
+                actual_abstract_gain.unwrap_or(-1),
+                exp_matches,
+                gain_matches,
+            );
+            state.params_inaccurate_count = 0;
+            return true;
+        }
+        false
+    }
 
     // Translate our 0..100 into the camera min/max range for analog gain.
     fn cam_gain(
@@ -1044,7 +1059,6 @@ impl RpiCamera {
         if self.capture_thread.is_none() {
             let cloned_state = self.state.clone();
             let cloned_stop_request = self.stop_request.clone();
-            let copied_binning = self.binning;
             let copied_is_color = self.is_color;
             // Allocate a thread for concurrent execution of image acquisition
             // and uncompressing with other activities.
@@ -1056,7 +1070,7 @@ impl RpiCamera {
                     .build()
                     .unwrap();
                 runtime.block_on(async move {
-                    Self::worker(cloned_state, cloned_stop_request, copied_binning,
+                    Self::worker(cloned_state, cloned_stop_request,
                                  copied_is_color).await;
                 });
             }));
@@ -1125,15 +1139,6 @@ impl AbstractCamera for RpiCamera {
 
     async fn optimal_gain(&self) -> Gain {
         Gain::new(100)
-    }
-
-    fn binning(&self) -> u32 {
-        self.binning
-    }
-
-    async fn set_hardware_binning(&mut self, _hw_binning: bool)
-                                  -> Result<(), CanonicalError> {
-        Ok(())  // TODO: implement hardware binning
     }
 
     async fn set_exposure_duration(

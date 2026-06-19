@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use canonical_error::{CanonicalError};
 use image::GrayImage;
 
+use cedar_detect::image_funcs::bin_2x2;
 use crate::abstract_camera::{AbstractCamera, CaptureParams, CapturedImage,
                              Gain, Offset};
 
@@ -47,6 +48,7 @@ impl ImageCamera {
 
     async fn capture_image(&mut self) {
         let image = self.image.deref().clone();
+        let binned_image = bin_2x2(&image);
         self.most_recent_capture = Some(CapturedImage {
             capture_params: CaptureParams {
                 exposure_duration: self.get_exposure_duration().await,
@@ -55,7 +57,7 @@ impl ImageCamera {
             },
             params_accurate: true,
             image: Arc::new(image),
-            binning: 1,
+            binned_image: Arc::new(binned_image),
             is_color: false,
             readout_time: SystemTime::now(),
             readout_instant: Instant::now(),
@@ -89,11 +91,6 @@ impl AbstractCamera for ImageCamera {
     async fn optimal_gain(&self) -> Gain {
         Gain::new(50)
     }
-
-    fn binning(&self) -> u32 { 1 }
-
-    async fn set_hardware_binning(&mut self, _hw_binning: bool)
-                                  -> Result<(), CanonicalError> { Ok(()) }
 
     async fn set_exposure_duration(&mut self, _exp_duration: Duration)
                                    -> Result<(), CanonicalError> {
