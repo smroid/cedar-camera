@@ -654,7 +654,6 @@ impl RpiCamera {
             .expect("Failed to configure camera");
         let cfg = cfgs.get(0).unwrap();
         let stride = cfg.get_stride() as usize;
-        let frame_size = cfg.get_frame_size() as usize;
 
         // Log the selected format.
         info!("Using camera format: {:?}", cfg.get_pixel_format());
@@ -669,6 +668,12 @@ impl RpiCamera {
         let stream = cfg.stream().unwrap();
         let frame_size = (cfg.get_stride() * cfg.get_size().height) as usize;
         let aligned_size = (frame_size + 4095) & !4095;
+
+        // Allocate frame buffers from the kernel CMA dma-heap (cached pages),
+        // and import them into libcamera. The default FrameBufferAllocator
+        // path produces uncached buffers (~130 MB/s reads); cached buffers run
+        // at full DRAM speed (~700 MB/s+). Cache coherency vs. camera DMA is
+        // maintained via DMA_BUF_IOCTL_SYNC bracketing the CPU read below.
         let dma_heap = DmaHeap::open_cma()
             .expect("Failed to open dma-heap (need /dev/dma_heap/linux,cma and `video` group)");
 
@@ -802,8 +807,19 @@ impl RpiCamera {
 
             // Grab the image.
             let framebuffer: &MemoryMappedFrameBuffer<OwnedFrameBuffer> = req.buffer(&stream).unwrap();
+            // Raw format has only one data plane containing bayer or mono data.
             let planes = framebuffer.data();
             let buf_data = planes.first().unwrap();
+            // Invalidate CPU caches so we see the freshly DMA'd camera data.
+            // Bracket CPU read access with cache-coherency ioctls. The guard
+            // calls SYNC END automatically on drop.
+            let dma_buf_fd = {
+                use libcamera::framebuffer::AsFrameBuffer;
+                framebuffer.planes().get(0).unwrap().fd()
+            };
+            let _sync_guard = dma_heap::DmaBufReadGuard::new(dma_buf_fd)
+                .map_err(|e| warn!("DMA_BUF_IOCTL_SYNC START failed: {:?}", e))
+                .ok();
 
             // Early re-queueing: immediately queue the spare request before
             // expensive processing. Detect setting changes here, at the point
@@ -815,14 +831,6 @@ impl RpiCamera {
                     warn!("Failed to queue spare request: {:?}", e);
                 }
             }
-
-            let dma_buf_fd = {
-                use libcamera::framebuffer::AsFrameBuffer;
-                framebuffer.planes().get(0).unwrap().fd()
-            };
-            let _sync_guard = dma_heap::DmaBufReadGuard::new(dma_buf_fd)
-                .map_err(|e| warn!("DMA_BUF_IOCTL_SYNC START failed: {:?}", e))
-                .ok();
 
             // Decode raw sensor data into full-res and 2x2-binned 8-bit images.
             let image: GrayImage;
@@ -858,6 +866,7 @@ impl RpiCamera {
                 binned_image = GrayImage::from_raw(
                     (width / 2) as u32, (height / 2) as u32, binned_data).unwrap();
             }
+            drop(_sync_guard);
 
             req.reuse(ReuseFlag::REUSE_BUFFERS);
             let controls = req.controls_mut();
