@@ -928,10 +928,10 @@ impl RpiCamera {
         }
         let exp_matches = actual_exposure.map(|actual| {
             let requested = state.camera_settings.exposure_duration;
-            // 5% tolerance: auto-exposure changes by at least 20% per step,
+            // 10% tolerance: auto-exposure changes by at least 20% per step,
             // so this window unambiguously identifies the requested setting.
             let diff = if actual > requested { actual - requested } else { requested - actual };
-            diff.as_secs_f64() < requested.as_secs_f64() * 0.05
+            diff.as_secs_f64() < requested.as_secs_f64() * 0.10
         });
         let gain_matches = actual_abstract_gain.map(|actual| {
             // Allow ±10: gain is set manually to 0 or 100, never tweaked by
@@ -949,13 +949,16 @@ impl RpiCamera {
         state.params_inaccurate_count += 1;
         if state.params_inaccurate_count >= PARAMS_ACCURATE_TIMEOUT {
             warn!("params_accurate timeout after {} frames: \
-                   requested exp={:.1}ms gain={}, \
-                   actual exp={:.1}ms gain={}",
+                   requested exp={:.4}ms gain={}, \
+                   actual exp={:.4}ms gain={} \
+                   (exp_matches={:?}, gain_matches={:?})",
                 PARAMS_ACCURATE_TIMEOUT,
                 state.camera_settings.exposure_duration.as_secs_f64() * 1000.0,
                 state.camera_settings.gain.value(),
                 actual_exposure.map_or(-1.0, |d| d.as_secs_f64() * 1000.0),
                 actual_abstract_gain.unwrap_or(-1),
+                exp_matches,
+                gain_matches,
             );
             state.params_inaccurate_count = 0;
             return true;
