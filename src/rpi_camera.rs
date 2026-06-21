@@ -692,6 +692,7 @@ impl RpiCamera {
         let mut reqs;
         {
             let locked_state = state.lock().await;
+            // Create capture requests and attach buffers.
             reqs = buffers
                 .into_iter()
                 .map(|buf| {
