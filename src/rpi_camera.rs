@@ -654,6 +654,7 @@ impl RpiCamera {
             .expect("Failed to configure camera");
         let cfg = cfgs.get(0).unwrap();
         let stride = cfg.get_stride() as usize;
+        let frame_size = cfg.get_frame_size() as usize;
 
         // Log the selected format.
         info!("Using camera format: {:?}", cfg.get_pixel_format());
@@ -665,15 +666,13 @@ impl RpiCamera {
             tx.send(req).unwrap();
         });
 
-        let stream = cfg.stream().unwrap();
-        let frame_size = (cfg.get_stride() * cfg.get_size().height) as usize;
-        let aligned_size = (frame_size + 4095) & !4095;
-
         // Allocate frame buffers from the kernel CMA dma-heap (cached pages),
         // and import them into libcamera. The default FrameBufferAllocator
         // path produces uncached buffers (~130 MB/s reads); cached buffers run
         // at full DRAM speed (~700 MB/s+). Cache coherency vs. camera DMA is
         // maintained via DMA_BUF_IOCTL_SYNC bracketing the CPU read below.
+        let stream = cfg.stream().unwrap();
+        let aligned_size = (frame_size + 4095) & !4095;
         let dma_heap = DmaHeap::open_cma()
             .expect("Failed to open dma-heap (need /dev/dma_heap/linux,cma and `video` group)");
 
