@@ -671,10 +671,10 @@ impl RpiCamera {
         // path produces uncached buffers (~130 MB/s reads); cached buffers run
         // at full DRAM speed (~700 MB/s+). Cache coherency vs. camera DMA is
         // maintained via DMA_BUF_IOCTL_SYNC bracketing the CPU read below.
-        let stream = cfg.stream().unwrap();
-        let aligned_size = (frame_size + 4095) & !4095;
         let dma_heap = DmaHeap::open_cma()
             .expect("Failed to open dma-heap (need /dev/dma_heap/linux,cma and `video` group)");
+        let stream = cfg.stream().unwrap();
+        let aligned_size = (frame_size + 4095) & !4095;
 
         let buffers: Vec<MemoryMappedFrameBuffer<OwnedFrameBuffer>> = (0..num_buffers)
             .map(|i| {
