@@ -20,7 +20,7 @@ use libcamera::{
         AeEnable, AnalogueGain, AwbEnable, ExposureTime, FrameDurationLimits,
         NoiseReductionMode,
     },
-    framebuffer_imported::ImportedFrameBuffer,
+    framebuffer::{FrameBufferPlane, OwnedFrameBuffer},
     framebuffer_map::MemoryMappedFrameBuffer,
     geometry,
     logging::{log_set_target, LoggingTarget},
@@ -40,6 +40,7 @@ use crate::{
     dma_heap::{self, DmaHeap},
     pisp_compression,
 };
+
 
 pub type ConvertFn = fn(
     stride: usize,
@@ -673,13 +674,18 @@ impl RpiCamera {
         let dma_heap = DmaHeap::open_cma()
             .expect("Failed to open dma-heap (need /dev/dma_heap/linux,cma and `video` group)");
         let stream = cfg.stream().unwrap();
-        let buffers: Vec<MemoryMappedFrameBuffer<ImportedFrameBuffer>> = (0..num_buffers)
+        let aligned_size = (frame_size + 4095) & !4095;
+
+        let buffers: Vec<MemoryMappedFrameBuffer<OwnedFrameBuffer>> = (0..num_buffers)
             .map(|i| {
-                let fd = dma_heap.alloc(frame_size)
-                    .expect("dma-heap alloc failed");
-                let ifb = ImportedFrameBuffer::new(fd, 0, frame_size, i as u64)
-                    .expect("ImportedFrameBuffer::new failed");
-                MemoryMappedFrameBuffer::new(ifb).unwrap()
+                let fd = dma_heap.alloc(aligned_size).expect("dma-heap alloc failed");
+                let plane = FrameBufferPlane {
+                    fd,
+                    offset: 0,
+                    length: aligned_size as u32,
+                };
+                let fb = OwnedFrameBuffer::new(vec![plane], Some(i as u64)).unwrap();
+                MemoryMappedFrameBuffer::new(fb).unwrap()
             })
             .collect();
 
@@ -800,8 +806,7 @@ impl RpiCamera {
             }
 
             // Grab the image.
-            let framebuffer: &MemoryMappedFrameBuffer<ImportedFrameBuffer> =
-                req.buffer(&stream).unwrap();
+            let framebuffer: &MemoryMappedFrameBuffer<OwnedFrameBuffer> = req.buffer(&stream).unwrap();
             // Raw format has only one data plane containing bayer or mono data.
             let planes = framebuffer.data();
             let buf_data = planes.first().unwrap();

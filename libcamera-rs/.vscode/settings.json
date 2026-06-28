@@ -1,9 +1,0 @@
-{
-    "[rust]": {
-        "editor.formatOnSave": true
-    },
-    "rust-analyzer.rustfmt.extraArgs": [
-        "+nightly"
-    ],
-    "C_Cpp.autoAddFileAssociations": false
-}
