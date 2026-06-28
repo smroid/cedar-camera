@@ -641,9 +641,10 @@ impl RpiCamera {
         let mut cfgs = Self::get_camera_configs(&cam)
             .expect("Failed to get camera configs in worker");
 
-        // 3 buffers: one being processed by the CPU, one in-flight to the
-        // camera, one spare for immediate re-queue.
-        let num_buffers = 3;
+        // 5 buffers: one being processed by the CPU, one in-flight to the
+        // camera, one spare for immediate re-queue. Plus extra buffers
+        // for higher frame rate.
+        let num_buffers = 5;
         {
             let mut cfg = cfgs.get_mut(0).unwrap();
             cfg.set_buffer_count(num_buffers as u32);
