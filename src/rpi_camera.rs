@@ -834,10 +834,14 @@ impl RpiCamera {
             }
 
             // Decode raw sensor data into full-res and 2x2-binned 8-bit images.
+            let mut image_data = unsafe {
+                let mut v = Vec::with_capacity(width * height);
+                v.set_len(width * height);
+                v
+            };
             let image: GrayImage;
             let binned_image: GrayImage;
             if pisp_compressed {
-                let mut image_data = vec![0u8; width * height];
                 pisp_compression::uncompress(
                     stride,
                     buf_data,
@@ -849,8 +853,11 @@ impl RpiCamera {
                 image = GrayImage::from_raw(width as u32, height as u32, image_data).unwrap();
                 binned_image = bin_2x2(&image);
             } else {
-                let mut image_data = vec![0u8; width * height];
-                let mut binned_data = vec![0u8; (width / 2) * (height / 2)];
+                let mut binned_data = unsafe {
+                    let mut v = Vec::with_capacity((width / 2) * (height / 2));
+                    v.set_len((width / 2) * (height / 2));
+                    v
+                };
                 Self::convert_to_8bit(
                     stride,
                     buf_data,
