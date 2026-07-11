@@ -5,7 +5,8 @@ We welcome contributions to this project!
 ## License for Contributions
 
 By contributing to this project, you agree that your contributions will be
-licensed under the same [MIT License](LICENSE.md) that covers the project.
+licensed under the same [Functional Source License](LICENSE.md) that covers the
+project.
 
 ## How to Contribute
 
