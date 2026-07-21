@@ -1010,6 +1010,9 @@ impl RpiCamera {
         }
         // Start capture thread if terminated or not yet started.
         if self.capture_thread.is_none() {
+            // Clear any stop request from a previous stop(), so the new
+            // worker doesn't see it set and exit immediately.
+            self.stop_request.store(false, Ordering::Relaxed);
             let cloned_state = self.state.clone();
             let cloned_stop_request = self.stop_request.clone();
             let copied_is_color = self.is_color;
@@ -1219,6 +1222,14 @@ impl AbstractCamera for RpiCamera {
 
     async fn stop(&mut self) {
         self.stop_request.store(true, Ordering::Relaxed);
-        self.capture_thread.take();
+        // Join the capture thread rather than merely detaching it: the
+        // thread's worker() tears down its CameraManager/camera acquisition
+        // as it exits, and libcamera aborts the process if a second
+        // CameraManager is constructed (by a subsequent restart) before the
+        // first is fully destroyed. Blocking join, so run off the async
+        // executor thread.
+        if let Some(handle) = self.capture_thread.take() {
+            let _ = tokio::task::spawn_blocking(move || handle.join()).await;
+        }
     }
 }
