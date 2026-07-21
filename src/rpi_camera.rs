@@ -72,6 +72,9 @@ pub struct RpiCamera {
     // Set by stop(); the capture thread exits when it sees this.
     stop_request: Arc<AtomicBool>,
 
+    // True after a successful start() until stop() is called.
+    running: bool,
+
     // Our capture thread. Executes worker().
     capture_thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -265,6 +268,7 @@ impl RpiCamera {
                 frame_id: 0,
             })),
             stop_request: Arc::new(AtomicBool::new(false)),
+            running: false,
             capture_thread: None,
         };
         cam.set_gain(cam.optimal_gain().await).await?;
@@ -1001,7 +1005,9 @@ impl RpiCamera {
         (frac * 100.0).ceil().clamp(0.0, 100.0) as i32
     }
 
-    async fn manage_worker_thread(&mut self) {
+    // Starts the capture thread if not already running. Called via the
+    // AbstractCamera::start() trait method.
+    fn start_worker_thread(&mut self) {
         // Has the worker terminated for some reason?
         if self.capture_thread.is_some()
             && self.capture_thread.as_ref().unwrap().is_finished()
@@ -1148,7 +1154,10 @@ impl AbstractCamera for RpiCamera {
         &mut self,
         prev_frame_id: Option<i32>,
     ) -> Result<(CapturedImage, i32), CanonicalError> {
-        self.manage_worker_thread().await;
+        if !self.running {
+            return Err(failed_precondition_error(
+                "capture_image() called before start()"));
+        }
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
         loop {
@@ -1183,7 +1192,10 @@ impl AbstractCamera for RpiCamera {
         &mut self,
         prev_frame_id: Option<i32>,
     ) -> Result<Option<(CapturedImage, i32)>, CanonicalError> {
-        self.manage_worker_thread().await;
+        if !self.running {
+            return Err(failed_precondition_error(
+                "try_capture_image() called before start()"));
+        }
         // Get the most recently posted image; return none if there is none yet
         // or the currently posted image's frame id is the same as
         // `prev_frame_id`.
@@ -1220,6 +1232,12 @@ impl AbstractCamera for RpiCamera {
         }
     }
 
+    async fn start(&mut self) -> Result<(), CanonicalError> {
+        self.start_worker_thread();
+        self.running = true;
+        Ok(())
+    }
+
     async fn stop(&mut self) {
         self.stop_request.store(true, Ordering::Relaxed);
         // Join the capture thread rather than merely detaching it: the
@@ -1231,5 +1249,6 @@ impl AbstractCamera for RpiCamera {
         if let Some(handle) = self.capture_thread.take() {
             let _ = tokio::task::spawn_blocking(move || handle.join()).await;
         }
+        self.running = false;
     }
 }

@@ -175,6 +175,11 @@ pub trait AbstractCamera {
 
     // Action methods.
 
+    /// Starts (or re-starts, after stop()) image capture. Must be called
+    /// before capture_image()/try_capture_image().
+    /// Many implementations will treat start() as a no-op (always running).
+    async fn start(&mut self) -> Result<(), CanonicalError>;
+
     /// Obtains a single image from this camera, as configured above. The
     /// returned image is "fresh" in that we either wait for a new exposure or
     /// return the most recently completed exposure.
@@ -183,12 +188,15 @@ pub trait AbstractCamera {
     /// yet a current image) if `prev_frame_id` is omitted. If `prev_frame_id`
     /// is supplied, the call blocks while the current image has the same id
     /// value.
+    /// Returns FailedPrecondition if start() has not been called (or stop()
+    /// was called since).
     /// Returns: the captured image along with its frame_id value.
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError>;
 
     /// Non-blocking variant of `capture_image()`. Returns None if
-    /// `capture_image()` would block.
+    /// `capture_image()` would block. Returns FailedPrecondition under the
+    /// same condition as capture_image().
     async fn try_capture_image(&mut self, prev_frame_id: Option<i32>)
                                -> Result<Option<(CapturedImage, i32)>, CanonicalError>;
 
@@ -197,9 +205,8 @@ pub trait AbstractCamera {
     async fn estimate_delay(&self, prev_frame_id: Option<i32>) -> Option<Duration>;
 
     /// Some implementations can shut down the camera to save power, e.g. by
-    /// discontinuing video mode. A subsequent call to capture_image() will
-    /// re-start the camera, at the expense of that capture_image() call taking
-    /// longer than usual.
+    /// discontinuing video mode. Capture does not resume until start() is
+    /// called again.
     /// Many implementations will treat stop() as a no-op.
     async fn stop(&mut self);
 }

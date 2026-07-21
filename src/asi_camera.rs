@@ -32,6 +32,9 @@ pub struct ASICamera {
     // Our state, shared between ASICamera methods and the capture thread.
     state: Arc<tokio::sync::Mutex<SharedState>>,
 
+    // True after a successful start() until stop() is called.
+    running: bool,
+
     // Our capture thread. Executes worker().
     capture_thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -140,6 +143,7 @@ impl ASICamera {
                 stop_request: false,
                 current_capture_settings: CaptureParams::new(),
             })),
+            running: false,
             capture_thread: None,
         };
         cam.set_gain(cam.optimal_gain().await).await?;
@@ -326,7 +330,9 @@ impl ASICamera {
         }
     }
 
-    fn manage_worker_thread(&mut self) {
+    // Starts the capture thread if not already running. Called via the
+    // AbstractCamera::start() trait method.
+    fn start_worker_thread(&mut self) {
         // Has the worker terminated for some reason?
         if self.capture_thread.is_some() &&
             self.capture_thread.as_ref().unwrap().is_finished()
@@ -461,7 +467,10 @@ impl AbstractCamera for ASICamera {
 
     async fn capture_image(&mut self, prev_frame_id: Option<i32>)
                            -> Result<(CapturedImage, i32), CanonicalError> {
-        self.manage_worker_thread();
+        if !self.running {
+            return Err(failed_precondition_error(
+                "capture_image() called before start()"));
+        }
         // Get the most recently posted image; wait if there is none yet or the
         // currently posted image's frame id is the same as `prev_frame_id`.
         loop {
@@ -492,7 +501,10 @@ impl AbstractCamera for ASICamera {
         &mut self, prev_frame_id: Option<i32>)
         -> Result<Option<(CapturedImage, i32)>, CanonicalError>
     {
-        self.manage_worker_thread();
+        if !self.running {
+            return Err(failed_precondition_error(
+                "try_capture_image() called before start()"));
+        }
         // Get the most recently posted image; return None if there is none yet
         // or the currently posted image's frame id is the same as
         // `prev_frame_id`.
@@ -522,10 +534,21 @@ impl AbstractCamera for ASICamera {
         }
     }
 
+    async fn start(&mut self) -> Result<(), CanonicalError> {
+        self.start_worker_thread();
+        self.running = true;
+        Ok(())
+    }
+
     async fn stop(&mut self) {
-        if self.capture_thread.is_some() {
+        if let Some(handle) = self.capture_thread.take() {
             self.state.lock().await.stop_request = true;
-            self.capture_thread.take().unwrap();
+            // Join rather than merely detach: mirrors the RpiCamera fix
+            // (see rpi_camera.rs stop()) so a subsequent start() cannot
+            // race a still-tearing-down worker. Blocking join, so run off
+            // the async executor thread.
+            let _ = tokio::task::spawn_blocking(move || handle.join()).await;
         }
+        self.running = false;
     }
 }

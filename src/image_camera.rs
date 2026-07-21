@@ -169,5 +169,9 @@ impl AbstractCamera for ImageCamera {
         }
     }
 
+    async fn start(&mut self) -> Result<(), CanonicalError> {
+        Ok(())
+    }
+
     async fn stop(&mut self) {}
 }
