@@ -619,6 +619,26 @@ impl RpiCamera {
         }
     }
 
+    // Renames the calling thread, as seen in /proc/<pid>/task/<tid>/comm.
+    // Linux truncates to 15 bytes plus a NUL.
+    fn set_thread_name(name: &str) {
+        const MAX_LEN: usize = 15;
+        let end = name.len().min(MAX_LEN);
+        let mut buf = [0_u8; MAX_LEN + 1];
+        buf[..end].copy_from_slice(&name.as_bytes()[..end]);
+        // Safety: buf is NUL-terminated (zero-initialized, and we write at
+        // most MAX_LEN of its MAX_LEN+1 bytes); PR_SET_NAME only reads it.
+        unsafe {
+            libc::prctl(
+                libc::PR_SET_NAME,
+                buf.as_ptr() as libc::c_ulong,
+                0,
+                0,
+                0,
+            );
+        }
+    }
+
     // The first call to capture_image() starts the capture thread that
     // executes this function.
     async fn worker(state: Arc<tokio::sync::Mutex<SharedState>>,
@@ -626,11 +646,14 @@ impl RpiCamera {
                     is_color: bool) {
         info!("Starting RpiCamera worker");
 
-        // Whenever we change the camera settings, we will have discarded the
-        // in-progress exposure, because the old settings were in effect when it
-        // started. We need to mark dirty a number of images after a setting
-        // change.
+        // libcamera spawns its own threads inside CameraManager::new(), and
+        // Linux gives a new thread the creating thread's name. Use the name we
+        // want those children to have across the call, then take our own name
+        // back below, so a thread listing distinguishes libcamera's pipeline
+        // threads from ours (which does the pixel conversion).
+        Self::set_thread_name("libcamera");
         let mgr = CameraManager::new().unwrap();
+        Self::set_thread_name("rpi_camera");
 
         // Setting AeEnable(false) in setup_camera_request causes the libcamera
         // C implementation to log spurious warnings. I was unable to
@@ -911,14 +934,16 @@ impl RpiCamera {
             locked_state.frame_id += 1;
 
             // Estimate of time at which `most_recent_capture` will next be
-            // updated.
+            // updated. In the free-running case this is the exposure plus the
+            // readout/processing time just measured for this frame; waiters
+            // that wake before then fall back to the 1ms poll interval.
             let now = Instant::now();
             if update_interval == Duration::ZERO {
-                locked_state.eta = Some(
-                    now + actual_exposure_duration.unwrap_or(
-                        locked_state.camera_settings.exposure_duration,
-                    ),
+                let exposure = actual_exposure_duration.unwrap_or(
+                    locked_state.camera_settings.exposure_duration,
                 );
+                let processing = last_frame_time.unwrap().elapsed();
+                locked_state.eta = Some(now + exposure + processing);
             } else {
                 locked_state.eta = Some(now + update_interval);
             }
@@ -1024,10 +1049,16 @@ impl RpiCamera {
             let copied_is_color = self.is_color;
             // Allocate a thread for concurrent execution of image acquisition
             // and uncompressing with other activities.
-            self.capture_thread = Some(std::thread::spawn(move || {
+            //
+            // Name this thread, not just the runtime's worker pool:
+            // block_on() drives worker() on this thread, so this is where
+            // capture and pixel conversion actually run.
+            self.capture_thread = Some(std::thread::Builder::new()
+                .name("rpi_camera".to_string())
+                .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
-                    .thread_name("rpi_camera")
+                    .thread_name("rpi_camera_rt")
                     .worker_threads(1)
                     .build()
                     .unwrap();
@@ -1035,7 +1066,8 @@ impl RpiCamera {
                     Self::worker(cloned_state, cloned_stop_request,
                                  copied_is_color).await;
                 });
-            }));
+            })
+            .unwrap());
         }
     }
 
