@@ -767,17 +767,6 @@ impl RpiCamera {
                 }
             }
 
-            // Is it time to grab a frame?
-            if let Some(lft) = last_frame_time {
-                let next_update_time = lft + update_interval;
-                let now = Instant::now();
-                if next_update_time > now {
-                    let delay = next_update_time - now;
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-            }
-            // Time to grab a frame.
             let mut req = match rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(req) => req,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -789,6 +778,24 @@ impl RpiCamera {
                     break; // Exit loop and cleanup.
                 }
             };
+
+            if !update_interval.is_zero() {
+                // Rate limiting: if this frame arrived sooner than
+                // `update_interval` after the last one we kept, discard it and
+                // wait for the next.
+                if let Some(lft) = last_frame_time {
+                    if lft.elapsed() < update_interval {
+                        req.reuse(ReuseFlag::REUSE_BUFFERS);
+                        let controls = req.controls_mut();
+                        Self::setup_camera_request(
+                            controls, &*state.lock().await);
+                        if let Err(e) = active_cam.queue_request(req) {
+                            warn!("Failed to requeue skipped request: {:?}", e);
+                        }
+                        continue;
+                    }
+                }
+            }
             let metadata = req.metadata();
 
             let readout_instant = Instant::now();
@@ -945,7 +952,9 @@ impl RpiCamera {
                 let processing = last_frame_time.unwrap().elapsed();
                 locked_state.eta = Some(now + exposure + processing);
             } else {
-                locked_state.eta = Some(now + update_interval);
+                // Rate limited: the next frame we keep is the first to arrive
+                // at least `update_interval` after this one's readout.
+                locked_state.eta = Some(readout_instant + update_interval);
             }
         } // loop.
           // Fallback cleanup if loop exits unexpectedly.
