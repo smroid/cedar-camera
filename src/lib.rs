@@ -4,6 +4,7 @@
 pub mod abstract_camera;
 pub mod dma_heap;
 pub mod image_camera;
+pub mod raw_convert;
 pub mod select_camera;
 
 #[cfg(feature = "asi")]

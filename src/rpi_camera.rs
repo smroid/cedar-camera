@@ -3,7 +3,7 @@
 
 use std::{
     fs,
-    sync::{atomic::{AtomicBool, Ordering}, Arc, OnceLock},
+    sync::{atomic::{AtomicBool, Ordering}, Arc},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -39,25 +39,8 @@ use crate::{
     },
     dma_heap::{self, DmaHeap},
     pisp_compression,
+    raw_convert,
 };
-
-
-pub type ConvertFn = fn(
-    stride: usize,
-    buf_data: &[u8],
-    image_data: &mut [u8],
-    binned_data: &mut [u8],
-    width: usize,
-    height: usize,
-    is_10_bit: bool,
-    is_12_bit: bool,
-    is_packed: bool,
-);
-static CONVERT_FN: OnceLock<ConvertFn> = OnceLock::new();
-pub fn set_converter(func: ConvertFn) {
-    log::info!("Setting raw image converter function.");
-    let _ = CONVERT_FN.set(func); // Ignores error if already set.
-}
 
 pub struct RpiCamera {
     // Dimensions, in mm, of the sensor.
@@ -540,14 +523,12 @@ impl RpiCamera {
         is_packed: bool,
     ) {
         // Use optimized function if we have one.
-        if !is_16_bit {
-            if let Some(f) = CONVERT_FN.get() {
-                f(
-                    stride, buf_data, image_data, binned_data, width, height,
-                    is_10_bit, is_12_bit, is_packed,
-                );
-                return;
-            }
+        if let Some(f) = raw_convert::converter() {
+            f(
+                stride, buf_data, image_data, binned_data, width, height,
+                is_10_bit, is_12_bit, is_16_bit, is_packed,
+            );
+            return;
         }
 
         // Reference implementation: decode to full-res 8-bit directly into
