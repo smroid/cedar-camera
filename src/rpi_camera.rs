@@ -224,12 +224,10 @@ impl RpiCamera {
                     || pixel_format.contains("BGGR"))
         };
 
-        // Annoyingly, different Rpi cameras have different analog gain values.
-        let min_gain = match model.as_str() {
-            "imx290" => 5, // AKA imx462.
-            _ => 1,
-        };
+        // All models use the sensor's minimum analog gain.
+        let min_gain = 1;
         debug!("min_gain {}", min_gain);
+        // Annoyingly, different Rpi cameras have different analog gain values.
         let max_gain = match model.as_str() {
             "imx477" => 22,
             "imx219" => 11,  // Hardware max is 10.667x (gain code 232/256).
