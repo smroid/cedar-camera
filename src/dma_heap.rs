@@ -2,14 +2,15 @@
 // See LICENSE file in root directory for license terms.
 //
 // Allocate cached, physically-contiguous DMA buffers from the kernel Contiguous
-// Memory Allocator (CMA) dma-heap and use them as camera framebuffers via
-// libcamera's import path.
+// Memory Allocator (CMA) dma-heap and use them as camera framebuffers, either
+// via libcamera's import path or as V4L2_MEMORY_DMABUF buffers.
 //
 // On Raspberry Pi (Bookworm) the kernel's CMA dma-heap is exposed at
 // /dev/dma_heap/linux,cma (or the udev symlink /dev/dma_heap/vidbuf_cached).
 // Buffers from this heap are cacheable in userspace, unlike the default
-// videobuf2-dma-contig buffers libcamera allocates internally, which are
-// uncached and slow to read from the CPU (~130 MB/s on Pi Zero 2W).
+// videobuf2-dma-contig buffers the kernel allocates for V4L2_MEMORY_MMAP
+// (and which libcamera uses internally), which are uncached and slow to read
+// from the CPU (~130 MB/s on Pi Zero 2W).
 //
 // CPU access to cached dma-buf memory must be bracketed with DMA_BUF_IOCTL_SYNC
 // to keep CPU caches coherent with device DMA writes.
@@ -72,7 +73,7 @@ impl DmaHeap {
     }
 
     /// Allocate a contiguous buffer of `len` bytes. Returns an owned dma-buf fd
-    /// that can be mmap'd (cached) and imported into libcamera.
+    /// that can be mmap'd (cached) and imported into libcamera or V4L2.
     pub fn alloc(&self, len: usize) -> io::Result<OwnedFd> {
         let mut req = DmaHeapAllocationData {
             len: len as u64,
