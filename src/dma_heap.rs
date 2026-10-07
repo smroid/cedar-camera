@@ -12,6 +12,10 @@
 // (and which libcamera uses internally), which are uncached and slow to read
 // from the CPU (~130 MB/s on Pi Zero 2W).
 //
+// Where the CMA area is sized by the `cma=` kernel argument rather than the
+// device tree (e.g. Armbian), the kernel names it "reserved", so the heap is
+// /dev/dma_heap/reserved.
+//
 // CPU access to cached dma-buf memory must be bracketed with DMA_BUF_IOCTL_SYNC
 // to keep CPU caches coherent with device DMA writes.
 
@@ -53,10 +57,11 @@ pub struct DmaHeap {
 
 impl DmaHeap {
     /// Open the kernel CMA dma-heap. Tries the udev symlink first, then the
-    /// canonical device name. Returns an error if neither is present or the
-    /// caller lacks permission (typically the `video` group).
+    /// device names. Returns an error if none is present or the caller lacks
+    /// permission (typically the `video` group).
     pub fn open_cma() -> io::Result<Self> {
-        for path in &["/dev/dma_heap/vidbuf_cached", "/dev/dma_heap/linux,cma"] {
+        for path in &["/dev/dma_heap/vidbuf_cached", "/dev/dma_heap/linux,cma",
+                      "/dev/dma_heap/reserved"] {
             match OpenOptions::new().read(true).write(true).open(path) {
                 Ok(file) => {
                     log::debug!("Opened dma-heap at {}", path);
@@ -68,7 +73,8 @@ impl DmaHeap {
         }
         Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "No dma-heap device found (looked for /dev/dma_heap/vidbuf_cached and /dev/dma_heap/linux,cma)",
+            "No dma-heap device found (looked for /dev/dma_heap/vidbuf_cached, \
+             /dev/dma_heap/linux,cma and /dev/dma_heap/reserved)",
         ))
     }
 
