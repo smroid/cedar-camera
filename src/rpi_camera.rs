@@ -109,8 +109,20 @@ struct SharedState {
     frame_id: i32,
 }
 
+/// Whether this is a Raspberry Pi.
+fn is_raspberry_pi() -> bool {
+    match fs::read_to_string("/proc/device-tree/model") {
+        Ok(model) => model.starts_with("Raspberry Pi"),
+        Err(_) => false,
+    }
+}
+
 impl RpiCamera {
+    /// Empty except on a Raspberry Pi.
     pub fn enumerate_cameras() -> Vec<EnumeratedCameraInfo> {
+        if !is_raspberry_pi() {
+            return vec![];
+        }
         let mgr = CameraManager::new().unwrap();
         let cameras = mgr.cameras();
         let mut answer = vec![];
@@ -132,6 +144,10 @@ impl RpiCamera {
     // Returns a RpiCamera instance that implements the AbstractCamera API.
     // `camera_index` is w.r.t. the enumerate_cameras() vector length.
     pub async fn new(camera_index: usize) -> Result<Self, CanonicalError> {
+        if !is_raspberry_pi() {
+            return Err(failed_precondition_error(
+                "Rpi camera is only supported on a Raspberry Pi"));
+        }
         let mgr = CameraManager::new().unwrap();
         let cameras = mgr.cameras();
         let cam = cameras.get(camera_index).unwrap();
