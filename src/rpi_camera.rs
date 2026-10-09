@@ -39,7 +39,7 @@ use crate::{
     },
     dma_heap::{self, DmaHeap},
     pisp_compression,
-    raw_convert,
+    raw_convert::{self, RawLayout},
 };
 
 pub struct RpiCamera {
@@ -540,10 +540,20 @@ impl RpiCamera {
     ) {
         // Use optimized function if we have one.
         if let Some(f) = raw_convert::converter() {
-            f(
-                stride, buf_data, image_data, binned_data, width, height,
-                is_10_bit, is_12_bit, is_16_bit, is_packed,
-            );
+            let layout = if is_16_bit {
+                RawLayout::Word16High
+            } else if is_10_bit && is_packed {
+                RawLayout::CsiPacked10
+            } else if is_10_bit {
+                RawLayout::Word16Low10
+            } else if is_12_bit && is_packed {
+                RawLayout::CsiPacked12
+            } else if is_12_bit {
+                RawLayout::Word16Low12
+            } else {
+                RawLayout::Raw8
+            };
+            f(stride, buf_data, image_data, binned_data, width, height, layout);
             return;
         }
 
