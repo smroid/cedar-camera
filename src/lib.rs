@@ -6,6 +6,7 @@ pub mod dma_heap;
 pub mod image_camera;
 pub mod raw_convert;
 pub mod select_camera;
+pub mod sim_camera;
 
 #[cfg(feature = "asi")]
 pub mod asi_camera;
