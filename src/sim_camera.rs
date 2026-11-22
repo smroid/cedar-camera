@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Steven Rosenthal smr@dt3.org
+// Copyright (c) 2026 Oleksandr Pryimak oleksandr.pryimak@gmail.com
 // See LICENSE file in root directory for license terms.
 
 // Simulated camera that plays back image files: a single image, or a directory
@@ -38,6 +38,9 @@ struct SimState {
     // All sources must resolve to a path under `root`.
     root: PathBuf,
     // The current source (file or directory), relative to `root`.
+    // This should always be a subdirectory of root
+    // Before setting canonize `root/source``
+    // and ensure `source`` is inside `root`
     source: PathBuf,
     frames: Vec<SimFrame>,
     // Bumped whenever `frames` is replaced.
